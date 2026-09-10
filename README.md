@@ -2,7 +2,7 @@
 
 A scheduler and GitHub dispatcher in one package, built for **OpenCode 2**.
 
-`@d3ckerbot` in an issue → acknowledgement and plan → implementation → verification → pull request.
+`@opencodebot` in an issue → acknowledgement and plan → implementation → verification → pull request.
 
 The model chooses each new PR title from the issue and completed-work summary.
 There is no fixed `Fix` prefix. The chosen title is saved before publication and
@@ -37,9 +37,9 @@ project yet. `$HOME` expands to your user's absolute home directory.
 2. Register the plugin and its terminal UI:
 
    ```bash
-   mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot"
-   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/index.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/index.js"
-   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/tui.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/tui.js"
+   mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation"
+   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/index.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/index.js"
+   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/tui.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/tui.js"
    ```
 
    Run this registration once; do not overwrite customized loaders.
@@ -66,8 +66,17 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    node "$HOME/opencode2-github-automation/dist/setup.js" init
    ```
 
-   Enter your OpenCode 2 model (`provider/model`). If asked for tests, enter the
-   project's test command or press Enter to skip. Do not add `--local`.
+   Each prompt shows a default in brackets. Press Enter to accept it or type
+   another value. The wizard asks for model, trigger, signature, allowed authors,
+   polling interval, automatic merging, merge method, and test command.
+   Do not add `--local`.
+
+   Defaults: the detected OpenCode model, `@opencodebot`, your GitHub login with
+   `[OpenCode2]`, your GitHub login as the allowed author, 60 seconds, automatic
+   merging enabled, squash, and detected tests (or `skip` if none are found).
+   If no model can be detected from the running service, enter `provider/model`.
+   Enter accepts detected tests; type `skip` to disable them. Complex test commands
+   can be entered as JSON argument arrays, e.g. `["npm", "run", "test:unit"]`.
 
 2. Review `/absolute/path/to/your-project/.opencode/automation.json`.
    To allow a colleague to request work, add their GitHub login to `authors`:
@@ -75,8 +84,8 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    ```json
    {
      "model": "local/deepseek",
-     "signature": "d3cker[OpenCode2]",
-     "authors": ["d3cker", "COLLEAGUE_LOGIN"],
+     "signature": "YOUR_LOGIN[OpenCode2]",
+     "authors": ["YOUR_LOGIN", "COLLEAGUE_LOGIN"],
      "autoMerge": {
        "enabled": true,
        "method": "squash"
@@ -96,7 +105,7 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    opencode2 /absolute/path/to/your-project
    ```
 
-Create an issue containing `@d3ckerbot`. The bot checks once a minute; `/bot`
+Create an issue containing `@opencodebot`. The bot checks once a minute; `/bot`
 shows progress. Existing matching issues may also be picked up.
 
 **Code is global; configuration is per project.** Only repositories containing
@@ -130,6 +139,18 @@ to finish first.
 Reopen the terminal client if the update changes the UI. Project configuration
 and queues remain in place. Do not repeat global registration or run `init` again.
 
+### Changes in this version
+
+The default trigger is now `@opencodebot`. Existing explicit `trigger`, `signature`,
+and `authors` settings are preserved. If an older configuration omitted `trigger`,
+set it explicitly before upgrading to retain the old mention (for example,
+`"trigger": "@your-existing-bot"`). The built-in merge phrases are now English;
+custom phrases can still be configured in any language.
+
+Existing global loader directories may be named `d3ckerbot`. Keep those loaders
+when updating; do not register a second copy under `opencode-automation`. When
+uninstalling, use the name of the directory you originally created.
+
 ### Switch to the feature branch for testing
 
 Replace update step 1 with:
@@ -137,12 +158,12 @@ Replace update step 1 with:
 ```bash
 cd "$HOME/opencode2-github-automation"
 git fetch origin
-git switch codex/pr-approval-merge-signatures
+git switch codex/english-setup-defaults
 git pull --ff-only
 ```
 
 Then complete update steps 2 and 3. The approval and signature features described
-below are available on this branch (`0.4.0-beta.1`).
+below are available on this branch (`0.4.0-beta.2`).
 
 ## 4. Remove automation from one project
 
@@ -177,7 +198,7 @@ For the global installation described above, wait for active work to finish.
 1. Remove only this plugin's two global loaders:
 
    ```bash
-   rm -i "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/index.js" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/tui.js"
+   rm -i "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/index.js" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/tui.js"
    ```
 
 2. Restart the service:
@@ -242,7 +263,7 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 
 | Field | Purpose |
 | --- | --- |
-| `trigger` | Mention that starts work; defaults to `@d3ckerbot`. |
+| `trigger` | Mention that starts work; defaults to `@opencodebot`. |
 | `everySeconds` | Polling interval; defaults to 60 seconds. |
 | `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
 | `authors` | GitHub usernames allowed to request work and authorize merging (merge also requires repository write access). |
@@ -253,11 +274,12 @@ When tests are skipped, the PR explicitly reports that automated tests were not
 run. Git consistency checks and the requirement for an actual change remain.
 Restart the service while idle after changing configuration.
 
-For noninteractive setup:
+For noninteractive setup, use `--yes` to accept defaults for omitted options.
+Provide the model and a test command (or explicitly skip tests):
 
 ```bash
 cd /absolute/path/to/your-project
-node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests
+node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests --yes
 ```
 
 ## Automatic merge and message signatures
@@ -268,11 +290,11 @@ Example project configuration:
 {
   "model": "provider/model",
   "check": false,
-  "signature": "d3cker[OpenCode2]",
+  "signature": "YOUR_LOGIN[OpenCode2]",
   "autoMerge": {
     "enabled": true,
     "method": "squash",
-    "comments": ["/merge", "lgtm, merge", "jest git, możesz mergować", "jest git, można mergować"]
+    "comments": ["/merge", "lgtm, merge", "approved, merge"]
   }
 }
 ```
@@ -355,7 +377,7 @@ npm pack
 installation archive. Build artifacts, dependencies, and local credentials are
 excluded from the source repository.
 
-Additional documentation (currently in Polish):
+Additional documentation:
 
 - [Moving the source and installing on another machine](docs/installation.md)
 - [Advanced configuration, retries, permissions, and separate plugins](docs/advanced.md)

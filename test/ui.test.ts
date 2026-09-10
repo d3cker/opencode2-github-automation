@@ -31,6 +31,8 @@ test("a start event opens a background tab once without navigating the current c
   try {
     f.event(activity); f.event(activity);
     assert.deepEqual(f.opened, ["ses_test"]); assert.equal(f.toasts.length, 1); assert.equal(f.navigated.length, 0);
+    assert.match(JSON.stringify(f.toasts[0]), /OpenCode Automation/);
+    assert.match(JSON.stringify(f.toasts[0]), /Working on/);
     f.event({ ...activity, key: "other/repo#1" }, "/other"); assert.equal(f.opened.length, 1);
     await f.command(); assert.deepEqual(f.navigated, [{ type: "session", sessionID: "ses_test" }]);
     f.event({ ...activity, status: "done", phase: "pr_opened" }); assert.equal(f.toasts.length, 2);

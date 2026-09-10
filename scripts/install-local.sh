@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -eq 0 || "${1:-}" == "--help" ]]; then
-  echo 'Usage: bash scripts/install-local.sh /absolute/path/to/project [--model provider/model] [--skip-tests] [--trigger @d3ckerbot]'
+  echo 'Usage: bash scripts/install-local.sh /absolute/path/to/project [--model provider/model] [--skip-tests] [--trigger @opencodebot]'
   echo 'Builds and installs locally. Existing automation.json is preserved. Does not restart OpenCode.'
   exit 0
 fi

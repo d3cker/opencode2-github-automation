@@ -4,16 +4,19 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { EasyOptions, checkout, detectCheck, resolveEasy } from "./easy.js";
+import { EasyOptions, checkout, detectCheck, resolveEasy, githubToken } from "./easy.js";
+import { OpenCode } from "@opencode/client";
+import { Service } from "@opencode/client/service";
+import { configure } from "./wizard.js";
 import { installLocalEntrypoints } from "./local.js";
 
 async function main() {
   const operation = process.argv[2];
   if (operation === "upgrade") {
     const { root, primary } = await checkout(process.cwd());
-    if (!primary) throw new Error("Uruchom upgrade w głównym checkoutcie.");
+    if (!primary) throw new Error("Run upgrade in the primary checkout.");
     await installLocalEntrypoints(root);
-    console.log("Zaktualizowano integrację OpenCode i interfejsu. Konfiguracja i kolejka zostały zachowane.");
+    console.log("Updated the OpenCode integration and UI. Configuration and queue were preserved.");
     return;
   }
   if (operation && ["status", "scan", "run", "pause", "resume", "retry"].includes(operation)) {
@@ -24,33 +27,54 @@ async function main() {
     return;
   }
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
+    signature: { type: "string" }, authors: { type: "string", multiple: true },
     model: { type: "string" }, check: { type: "string", multiple: true }, trigger: { type: "string" },
     "skip-tests": { type: "boolean", default: false },
+    yes: { type: "boolean", default: false },
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation init [--model provider/model] [--trigger @d3ckerbot] [--check executable --check argument | --skip-tests] [--local]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\nRun inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\nRun inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());
-  if (!primary) throw new Error("Uruchom init w głównym checkoutcie repozytorium.");
-  if (values["skip-tests"] && values.check) throw new Error("Wybierz --check albo --skip-tests.");
+  if (!primary) throw new Error("Run init in the primary repository checkout.");
+  if (values["skip-tests"] && values.check) throw new Error("Choose --check or --skip-tests.");
   const detected = await detectCheck(root);
-  let model = values.model;
-  let check: string[] | false | undefined = values["skip-tests"] ? false : values.check ?? detected;
-  if ((!model || check === undefined) && !stdin.isTTY) throw new Error("Podaj --model provider/model oraz --check lub --skip-tests, jeśli nie wykryto testów.");
-  if (!model || check === undefined) {
+  const check = values["skip-tests"] ? false : values.check ?? detected;
+  let settings: unknown = { model: values.model, ...(values.trigger ? { trigger: values.trigger } : {}),
+    ...(values.signature ? { signature: values.signature } : {}), ...(values.authors ? { authors: values.authors } : {}),
+    ...(check === false || values.check || !detected ? { check } : {}) };
+  // Refuse an existing configuration before making requests or asking questions.
+  try { await readFile(join(root, ".opencode", "automation.json")); throw new Error("Configuration already exists. Edit .opencode/automation.json instead."); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (stdin.isTTY && !values.yes) {
+    const token = await githubToken();
+    const user = await fetch("https://api.github.com/user", { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }, redirect: "error", signal: AbortSignal.timeout(15_000) });
+    if (!user.ok) throw new Error(`GitHub HTTP ${user.status}. Check your authentication.`);
+    const login = (await user.json() as { login?: string }).login;
+    if (!login) throw new Error("GitHub did not return an account login");
+    let defaultModel: string | undefined;
+    if (!values.model) {
+      try {
+        const endpoint = await Service.discover();
+        if (endpoint) {
+          const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) });
+          const result = await client.model.default({ location: { directory: root } }, { signal: AbortSignal.timeout(5000) });
+          if (result.data) defaultModel = `${result.data.providerID}/${result.data.id}`;
+        }
+      } catch { /* If no model can be detected, require an explicit choice. */ }
+    }
     const prompt = createInterface({ input: stdin, output: stdout });
     try {
-      model ??= (await prompt.question("Model z OpenCode 2 (provider/model): ")).trim();
-      if (check === undefined) {
-        const command = (await prompt.question("Komenda testów (np. npm test). Enter = pomiń, jeśli projekt nie ma testów: ")).trim();
-        if (/["'|;&<>`$\\]/.test(command)) throw new Error("Dla złożonych argumentów użyj powtarzanego --check.");
-        check = command ? command.split(/\s+/).filter(Boolean) : false;
-      }
+      settings = await configure(message => prompt.question(message), { login, model: defaultModel, check: detected }, {
+        model: values.model, trigger: values.trigger, signature: values.signature, authors: values.authors,
+        check: values["skip-tests"] ? false : values.check,
+      });
     } finally { prompt.close(); }
+  } else if (!values.model || check === undefined) {
+    throw new Error("Pass --model provider/model and --check or --skip-tests when no tests are detected.");
   }
-  const settings = { model, ...(values.trigger ? { trigger: values.trigger } : {}), ...(check === false || values.check || !detected ? { check } : {}) };
   const resolved = await resolveEasy(root, EasyOptions.parse(settings));
   // Resolve everything before changing files. Never overwrite existing user configuration.
   const folder = join(root, ".opencode");
@@ -63,6 +87,6 @@ async function main() {
       await installLocalEntrypoints(root);
     }
   } catch (error) { await rm(file); throw error; }
-  console.log(`Gotowe: ${resolved.repo}. Znacznik: ${values.trigger ?? "@d3ckerbot"}. Autor: ${resolved.login}. Testy: ${resolved.check === false ? "pominięte — PR będzie zawierał tę informację" : resolved.check.join(" ")}.\nOtwórz ponownie projekt w OpenCode 2. Automatyzacja podejmie także istniejące pasujące issues.`);
+  console.log(`Ready: ${resolved.repo}. Trigger: ${EasyOptions.parse(settings).trigger}. Account: ${resolved.login}. Tests: ${resolved.check === false ? "skipped — the PR will report this" : resolved.check.join(" ")}.\nReopen the project in OpenCode 2. Automation also considers existing matching issues.`);
 }
-main().catch(error => { console.error(error instanceof Error ? error.message : "Konfiguracja nie powiodła się"); process.exitCode = 1; });
+main().catch(error => { console.error(error instanceof Error ? error.message : "Configuration failed"); process.exitCode = 1; });

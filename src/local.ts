@@ -13,12 +13,12 @@ export async function installLocalEntrypoints(root: string) {
   const parent = join(root, ".opencode", "plugins"), directory = join(parent, "automation");
   const legacy = join(parent, "automation.js");
   const old = await readOptional(legacy);
-  if (old !== undefined && old !== server) throw new Error("Nie nadpisuję zmodyfikowanego plugins/automation.js.");
+  if (old !== undefined && old !== server) throw new Error("Refusing to overwrite customized plugins/automation.js.");
   const entries = [[join(directory, "index.js"), server], [join(directory, "tui.js"), tui]] as const;
   const missing: typeof entries[number][] = [];
   for (const entry of entries) {
     const content = await readOptional(entry[0]);
-    if (content !== undefined && content !== entry[1]) throw new Error(`Nie nadpisuję zmodyfikowanego pliku: ${entry[0]}`);
+    if (content !== undefined && content !== entry[1]) throw new Error(`Refusing to overwrite a customized file: ${entry[0]}`);
     if (content === undefined) missing.push(entry);
   }
   await mkdir(directory, { recursive: true });

@@ -1,3 +1,3 @@
 # Repository instructions
 
-Write and maintain all README files in English. This also applies when the conversation is in Polish.
+Use English for all user-facing prompts, UI labels, errors, generated bot messages, examples, and documentation. Do not hard-code a personal account in defaults.

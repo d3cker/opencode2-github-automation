@@ -8,7 +8,7 @@ export const EasyOptions = z.object({
   signature: z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/).optional(),
   autoMerge: MergeOptions.optional(),
   model: z.string().regex(/^[^/\s]+\/\S+$/, "Model must have the form provider/model"),
-  trigger: z.string().regex(/^@[A-Za-z0-9_-]+$/).default("@d3ckerbot"),
+  trigger: z.string().regex(/^@[A-Za-z0-9_-]+$/).default("@opencodebot"),
   everySeconds: z.number().int().min(1).default(60),
   check: z.union([z.literal(false), z.array(z.string().min(1)).min(1)]).optional(),
   authors: z.array(z.string().regex(/^[A-Za-z0-9_.-]+$/)).min(1).optional(),
@@ -30,7 +30,7 @@ export async function githubToken(tokenEnv = "GITHUB_TOKEN", execute = run): Pro
     const value = await execute(process.cwd(), ["gh", "auth", "token", "--hostname", "github.com"]);
     if (value) return value;
   } catch { /* Present an actionable message without exposing command output. */ }
-  throw new Error("Zaloguj GitHub: gh auth login. Alternatywnie ustaw GITHUB_TOKEN w środowisku OpenCode 2.");
+  throw new Error("Sign in with gh auth login, or set GITHUB_TOKEN in the OpenCode 2 service environment.");
 }
 
 export async function checkout(directory: string, execute = run) {
@@ -55,24 +55,24 @@ export async function detectCheck(directory: string): Promise<string[] | undefin
 export async function resolveEasy(directory: string, raw: unknown, execute = run, fetcher: typeof fetch = fetch) {
   const options = EasyOptions.parse(raw);
   const { root, common, primary } = await checkout(directory, execute);
-  if (!primary) throw new Error("Uruchom konfigurację w głównym checkoutcie, nie w worktree.");
+  if (!primary) throw new Error("Run setup in the primary checkout, not a worktree.");
   const remote = await execute(root, ["git", "remote", "get-url", "origin"]);
   const repo = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^\s]+?)(?:\.git)?$/.exec(remote)?.[1];
-  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("origin musi wskazywać repozytorium na GitHub.com.");
+  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("origin must point to a GitHub.com repository.");
   const token = await githubToken("GITHUB_TOKEN", execute);
   const get = async (path: string) => {
     const response = await fetcher(`https://api.github.com${path}`, {
       redirect: "error", signal: AbortSignal.timeout(15_000),
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10" },
     });
-    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}. Sprawdź konto i dostęp do repozytorium.`);
+    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}. Check your account and repository access.`);
     return response.json();
   };
   const [user, metadata] = await Promise.all([get("/user"), get(`/repos/${repo}`)]);
   const login = z.object({ login: z.string() }).parse(user).login;
   const baseBranch = z.object({ default_branch: z.string() }).parse(metadata).default_branch;
   const check = options.check ?? await detectCheck(root);
-  if (check === undefined) throw new Error("Nie wykryto testów. Uruchom init i naciśnij Enter, aby je pominąć, lub użyj --skip-tests.");
+  if (check === undefined) throw new Error("No tests detected. Run init and accept skip, or pass --skip-tests.");
   const slash = options.model.indexOf("/");
   const stateDirectory = join(common, "opencode2-automation");
   const github = GithubOptions.parse({ signature: options.signature ?? `${login}[OpenCode2]`, autoMerge: options.autoMerge, ownerDirectory: root, stateDirectory,

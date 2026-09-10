@@ -41,7 +41,7 @@ test("minimal setup resolves repository, account, branch, private state and both
     assert.equal(result.repo, "owner/project");
     assert.deepEqual(result.github.repositories[0]?.allowedAuthors, ["alice"]);
     assert.equal(result.github.repositories[0]?.baseBranch, "develop");
-    assert.equal(result.github.routes["@d3ckerbot"]?.model.id, "model/variant");
+    assert.equal(result.github.routes["@opencodebot"]?.model.id, "model/variant");
     assert.equal(result.scheduler.jobs[0]?.everySeconds, 60);
     assert.equal(result.scheduler.stateDirectory, result.github.stateDirectory);
     assert.ok(result.github.stateDirectory.endsWith("/.git/opencode2-automation"));
