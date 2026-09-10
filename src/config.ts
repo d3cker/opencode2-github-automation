@@ -16,7 +16,14 @@ export const Repository = z.object({
   checks: z.array(z.array(z.string().min(1)).min(1)),
 }).strict();
 export type Repository = z.infer<typeof Repository>;
+export const MergeOptions = z.object({
+  enabled: z.boolean().default(true),
+  method: z.enum(["merge", "squash", "rebase"]).default("squash"),
+  comments: z.array(z.string().trim().min(1)).min(1).default(["/merge", "lgtm, merge", "jest git, możesz mergować", "jest git, można mergować"]),
+}).strict();
 export const GithubOptions = z.object({
+  signature: z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/).optional(),
+  autoMerge: MergeOptions.default({ enabled: true, method: "squash", comments: ["/merge", "lgtm, merge", "jest git, możesz mergować", "jest git, można mergować"] }),
   ownerDirectory: absolute,
   stateDirectory: absolute,
   tokenEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).default("GITHUB_TOKEN"),

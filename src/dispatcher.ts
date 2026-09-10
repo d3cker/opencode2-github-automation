@@ -18,6 +18,7 @@ export const Task = z.object({
   feedback: z.array(Comment).optional(), pendingFeedback: z.array(Comment).optional(), commentCursor: z.number().optional(),
   previousSessionID: z.string().optional(),
   checks: z.array(z.string()).optional(), commit: z.string().optional(),
+  publishedAt: z.number().optional(), merged: z.boolean().optional(), mergeError: z.string().optional(), mergeNextAt: z.number().optional(),
   prTitle: z.string().min(1).max(240).optional(),
   pr: z.object({ number: z.number(), html_url: z.string(), state: z.string() }).optional(), error: z.string().optional(),
 });
@@ -27,6 +28,7 @@ export type Queue = z.infer<typeof Queue>;
 export class Blocked extends Error {}
 
 export interface GithubPort {
+  mergeApproved?(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean>;
   issues(repo: string): Promise<Issue[]>;
   issue(repo: string, number: number): Promise<Issue>;
   comments(repo: string, number: number): Promise<Comment[]>;
@@ -140,7 +142,7 @@ export class Dispatcher {
     const activeSession = resumable.find(t => t.phase === "running" && t.sessionID);
     const task = activeSession ?? resumable.find(t => t.nextAt <= this.now());
     if (task && task.nextAt > this.now()) return;
-    if (!task) return;
+    if (!task) { await this.mergeOnce(); return; }
     const repo = this.options.repositories.find(r => r.repo === task.repo);
     try {
       if (!repo) throw new Blocked("Repository removed from configuration");
@@ -190,13 +192,35 @@ export class Dispatcher {
           await this.executor.push(task, repo);
           pr = await this.github.ensurePull(task.repo, task.branch, repo.baseBranch, task.prTitle!, `${task.analysis}\n\nCloses #${task.issue.number}\n\nChecks:\n${task.checks?.length ? task.checks.map(c => `- ${c}`).join("\n") : "- Automated tests were not run: no test command configured. Only Git consistency checks were performed."}\n\nOpenCode session: ${task.sessionID}\nCommit: ${task.commit}`);
         }
-        await this.update(task, { pr, phase: "pr_opened", status: "done", attempts: 0 });
+        await this.update(task, { pr, publishedAt: this.now(), phase: "pr_opened", status: "done", attempts: 0 });
       }
     } catch (error) {
       if (this.signal.aborted) return;
       const attempts = task.attempts + 1;
       const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
       await this.update(task, { attempts, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
+    }
+  }
+  private async mergeOnce() {
+    if (!this.options.autoMerge.enabled || !this.github.mergeApproved) return;
+    for (const task of this.queue.tasks) {
+      if (task.status !== "done" || !task.pr || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
+      const repo = this.options.repositories.find(r => r.repo === task.repo);
+      if (!repo) continue;
+      // Older queues start watching now; historical approvals must not trigger an unexpected merge.
+      if (!task.publishedAt) { await this.update(task, { publishedAt: this.now() }); continue; }
+      try {
+        await this.scan(); // Pick up issue feedback before considering a completed task for merge.
+        if (task.pendingFeedback?.length) continue;
+        const merged = await this.github.mergeApproved(task.repo, task.pr.number, task.commit, task.publishedAt, repo.allowedAuthors, this.options.autoMerge);
+        if (merged) {
+          await this.github.ensureComment(task.repo, task.pr.number, `<!-- opencode2:${task.key}:merged -->`, "Pull request merged.");
+          await this.update(task, { merged: true, pr: { ...task.pr, state: "closed" }, mergeError: undefined });
+        } else await this.update(task, { mergeError: undefined, mergeNextAt: this.now() + 60_000 });
+      } catch (error) {
+        if (this.signal.aborted) return;
+        await this.update(task, { mergeError: redact(error, this.secrets), mergeNextAt: Math.max(this.now() + 60_000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
+      }
     }
   }
   async retry(key: string, restartSession: boolean) {

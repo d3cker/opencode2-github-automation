@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { Review, DatedComment, approvalAuthors } from "./approval.js";
+import type { GithubOptions } from "./config.js";
 
 export const Issue = z.object({
   number: z.number().int().positive(), title: z.string(), body: z.string().nullable(),
@@ -15,7 +17,7 @@ export class GithubError extends Error {
 }
 export class Github {
   private login?: string;
-  constructor(private token: string, private signal: AbortSignal, private fetcher: typeof fetch = fetch) {}
+  constructor(private token: string, private signal: AbortSignal, private fetcher: typeof fetch = fetch, private signature?: string) {}
   private async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
     this.signal.throwIfAborted();
     const response = await this.fetcher(`https://api.github.com${path}`, {
@@ -43,18 +45,43 @@ export class Github {
   issues(repo: string) { return this.pages(`/repos/${repo}/issues?state=open&sort=created&direction=asc`, Issue); }
   async issue(repo: string, number: number) { return Issue.parse(await this.request(`/repos/${repo}/issues/${number}`)); }
   comments(repo: string, number: number) { return this.pages(`/repos/${repo}/issues/${number}/comments`, Comment); }
+  private async signed(body: string) {
+    this.login ??= z.object({ login: z.string() }).parse(await this.request("/user")).login;
+    return `${body}\n\n${this.signature ?? `${this.login}[OpenCode2]`}`;
+  }
   async ensureComment(repo: string, number: number, marker: string, body: string): Promise<number> {
     this.login ??= z.object({ login: z.string() }).parse(await this.request("/user")).login;
     const comments = await this.comments(repo, number);
     const found = comments.find(c => c.user.login === this.login && c.body.includes(marker));
     if (found) return found.id;
-    return Comment.parse(await this.request(`/repos/${repo}/issues/${number}/comments`, "POST", { body: `${marker}\n${body}` })).id;
+    return Comment.parse(await this.request(`/repos/${repo}/issues/${number}/comments`, "POST", { body: await this.signed(`${marker}\n${body}`) })).id;
   }
   async findPull(repo: string, branch: string): Promise<Pull | undefined> {
     const head = encodeURIComponent(`${repo.split("/")[0]}:${branch}`);
     return (await this.pages(`/repos/${repo}/pulls?state=all&head=${head}`, Pull))[0];
   }
   async ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull> {
-    return await this.findPull(repo, branch) ?? Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body }));
+    return await this.findPull(repo, branch) ?? Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body: await this.signed(body) }));
   }
+  async mergeApproved(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean> {
+    const detail = z.object({ state: z.string(), merged: z.boolean(), draft: z.boolean(), head: z.object({ sha: z.string() }), mergeable: z.boolean().nullable(), mergeable_state: z.string() });
+    const pr = detail.parse(await this.request(`/repos/${repo}/pulls/${number}`));
+    if (pr.merged) return true; // Reconcile a lost merge response without merging twice.
+    if (pr.state !== "open" || pr.draft || pr.head.sha !== commit) return false;
+    const reviews = await this.pages(`/repos/${repo}/pulls/${number}/reviews`, Review);
+    const comments = await this.pages(`/repos/${repo}/issues/${number}/comments`, DatedComment);
+    const candidates = approvalAuthors(reviews, comments, commit, since, options.comments)
+      .filter(login => authors.some(a => a.toLowerCase() === login.toLowerCase()));
+    let authorized = false;
+    for (const login of candidates) {
+      const permission = z.object({ permission: z.string() }).parse(await this.request(`/repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`));
+      if (["admin", "maintain", "write"].includes(permission.permission)) { authorized = true; break; }
+    }
+    if (!authorized) return false;
+    if (!pr.mergeable || pr.mergeable_state !== "clean") throw new Error(`Approved PR is not ready to merge (${pr.mergeable_state}); waiting for checks and branch rules`);
+    const result = z.object({ merged: z.boolean() }).parse(await this.request(`/repos/${repo}/pulls/${number}/merge`, "PUT", { sha: commit, merge_method: options.method }));
+    if (!result.merged) throw new Error("GitHub did not merge the approved PR; waiting for its merge requirements");
+    return true;
+  }
+
 }

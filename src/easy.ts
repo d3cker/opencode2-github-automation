@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { GithubOptions, SchedulerOptions } from "./config.js";
+import { GithubOptions, SchedulerOptions, MergeOptions } from "./config.js";
 
 export const EasyOptions = z.object({
+  signature: z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/).optional(),
+  autoMerge: MergeOptions.optional(),
   model: z.string().regex(/^[^/\s]+\/\S+$/, "Model must have the form provider/model"),
   trigger: z.string().regex(/^@[A-Za-z0-9_-]+$/).default("@d3ckerbot"),
   everySeconds: z.number().int().min(1).default(60),
@@ -73,7 +75,7 @@ export async function resolveEasy(directory: string, raw: unknown, execute = run
   if (check === undefined) throw new Error("Nie wykryto testów. Uruchom init i naciśnij Enter, aby je pominąć, lub użyj --skip-tests.");
   const slash = options.model.indexOf("/");
   const stateDirectory = join(common, "opencode2-automation");
-  const github = GithubOptions.parse({ ownerDirectory: root, stateDirectory,
+  const github = GithubOptions.parse({ signature: options.signature ?? `${login}[OpenCode2]`, autoMerge: options.autoMerge, ownerDirectory: root, stateDirectory,
     repositories: [{ repo, directory: root, baseBranch, allowedAuthors: options.authors ?? [login], checks: check === false ? [] : [check] }],
     routes: { [options.trigger]: { agent: "build", model: { providerID: options.model.slice(0, slash), id: options.model.slice(slash + 1) } } },
   });

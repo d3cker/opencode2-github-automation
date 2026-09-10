@@ -146,7 +146,7 @@ MVP nie sprząta ich automatycznie.
 - GitHub.com i token użytkownika; bez GitHub Enterprise i tokenów instalacji App.
 - Worktree izoluje pliki projektu, ale nie jest sandboxem dla narzędzi agenta.
   Autorzy issues i uprawnienia wykonawcy muszą być świadomie skonfigurowani.
-- Nie wykonujemy auto-merge. PR powstaje tylko przy rzeczywistej zmianie i
+- Auto-merge wymaga akceptacji uprawnionego autora dla aktualnej publikacji; szczegóły i konfiguracja są w README. PR powstaje tylko przy rzeczywistej zmianie i
   przejściu skonfigurowanych sprawdzeń.
 - Testy lokalne używają rzeczywistego Git i SDK V2 oraz atrap GitHub API i sesji.
   Nie zastępują testu integracyjnego z Twoim serwerem, modelem i repozytorium.

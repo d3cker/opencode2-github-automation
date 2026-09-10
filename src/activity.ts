@@ -10,10 +10,10 @@ export const Activity = z.object({
 export type Activity = z.infer<typeof Activity>;
 export function activityOf(task: Task): Activity {
   return { key: task.key, repo: task.repo, issueNumber: task.issue.number, round: task.round ?? 1,
-    phase: task.phase, status: task.status,
+    phase: task.merged ? "merged" : task.phase, status: task.status,
     ...(task.sessionID ? { sessionID: task.sessionID } : {}),
     ...(task.worktree ? { worktree: task.worktree } : {}),
     sessionReady: task.sessionReady ?? Boolean(task.promptAttempted),
-    ...(task.error ? { error: task.error } : {}),
+    ...(task.error || task.mergeError ? { error: task.error ?? task.mergeError } : {}),
     ...(task.pr ? { prURL: task.pr.html_url } : {}) };
 }

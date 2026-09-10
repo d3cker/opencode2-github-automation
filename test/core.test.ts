@@ -256,3 +256,33 @@ test("failed title assessment never publishes a generic Fix title", async () => 
   const d = f.make(); await d.init(); await d.scan(); await d.tick();
   assert.equal(d.status()[0]?.status, "retry_wait"); assert.ok(!f.events.includes("pr")); assert.ok(!f.events.includes("push"));
 });
+
+test("completed PR merges once after approval and posts acknowledgement", async () => {
+  const f = fixture(); let merges = 0;
+  f.github.mergeApproved = async () => { merges++; return true; };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick(); await d.tick(); await d.tick();
+  assert.equal(merges, 1); assert.equal(d.status()[0]?.merged, true);
+  assert.equal(f.events.filter(e => e === "comment").length, 2);
+});
+test("new issue feedback prevents auto-merge and merge failures remain retryable", async () => {
+  const f = fixture(); let merges = 0;
+  f.github.mergeApproved = async () => { merges++; throw new Error("checks pending"); };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick(); await d.tick();
+  assert.match(d.status()[0]?.mergeError ?? "", /checks pending/); assert.equal(d.status()[0]?.status, "done");
+  f.advance(); f.github.comments = async () => [{ id: 99, body: "Please change this", user: { login: "alice" } }];
+  await d.tick(); assert.equal(merges, 1); assert.equal(d.status()[0]?.pendingFeedback?.length, 1);
+});
+
+test("upgraded queues ignore historical approvals until a new watching baseline exists", async () => {
+  const f = fixture(); const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  delete f.store.data.tasks[0]!.publishedAt;
+  let since = 0; f.github.mergeApproved = async (_repo, _number, _commit, baseline) => { since = baseline; return false; };
+  const resumed = f.make(); await resumed.init(); f.advance(); await resumed.tick();
+  assert.equal(since, 0); const baseline = resumed.status()[0]!.publishedAt!;
+  await resumed.tick(); assert.equal(since, baseline); assert.ok(baseline > 1000);
+});
+test("auto-merge can be disabled independently of issue processing", async () => {
+  const f = fixture(); let called = false; f.github.mergeApproved = async () => { called = true; return true; };
+  const d = new Dispatcher({ ...options, autoMerge: { ...options.autoMerge, enabled: false } }, f.store, f.github, f.executor, new AbortController().signal);
+  await d.init(); await d.scan(); await d.tick(); await d.tick(); assert.equal(called, false); assert.equal(d.status()[0]?.status, "done");
+});
