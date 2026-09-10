@@ -20,7 +20,7 @@ test("local upgrade migrates the legacy loader, adds TUI and preserves configura
     await assert.rejects(readFile(join(folder, "plugins", "automation.js")), { code: "ENOENT" });
     assert.equal(await readFile(join(folder, "automation.json"), "utf8"), '{"model":"provider/model","check":false}');
     await writeFile(join(folder, "plugins", "automation", "tui.js"), "custom content");
-    await assert.rejects(installLocalEntrypoints(root), /Nie nadpisuję/);
+    await assert.rejects(installLocalEntrypoints(root), /Refusing to overwrite/);
     assert.equal(await readFile(join(folder, "plugins", "automation", "tui.js"), "utf8"), "custom content");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

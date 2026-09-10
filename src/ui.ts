@@ -23,9 +23,9 @@ export function setupUI(context: Plugin.Context) {
     if (initial && !started) return;
     if (started) {
       const opened = context.ui.tabs.open(activity.sessionID!); // The SDK explicitly opens this in the background.
-      context.ui.toast.show({ title: "d3ckerbot", message: `Pracuję nad ${activity.key}. ${opened ? "Sesja w karcie · " : "Otwórz sesję: "}/bot`, variant: "info", duration: 8000 });
+      context.ui.toast.show({ title: "OpenCode Automation", message: `Working on ${activity.key}. ${opened ? "Session in a tab · " : "Open session: "}/bot`, variant: "info", duration: 8000 });
     } else {
-      context.ui.toast.show({ title: "d3ckerbot", message: `${activity.key}: ${activity.status === "done" ? "gotowe — PR zaktualizowany" : "wymaga uwagi"}. /bot`, variant: activity.status === "done" ? "success" : "warning", duration: 8000 });
+      context.ui.toast.show({ title: "OpenCode Automation", message: `${activity.key}: ${activity.status === "done" ? "done — PR updated" : "needs attention"}. /bot`, variant: activity.status === "done" ? "success" : "warning", duration: 8000 });
     }
   };
   const sync = async (initial = false) => {
@@ -44,19 +44,19 @@ export function setupUI(context: Plugin.Context) {
     context.keymap.layer(() => ({
     mode: "global",
     commands: [{
-      id: "automation.sessions", title: "Bot: pokaż pracę nad issues", group: "Bot", palette: true,
+      id: "automation.sessions", title: "Bot: show issue tasks", group: "Bot", palette: true,
       slash: { name: "bot" },
       run: async () => {
         await sync(true);
         const rows = [...states.values()].reverse();
-        if (!rows.length) { context.ui.toast.show({ message: "Brak zadań bota w tym projekcie.", variant: "info" }); return; }
+        if (!rows.length) { context.ui.toast.show({ message: "No bot tasks in this project.", variant: "info" }); return; }
         const selected = await context.ui.dialog.select({
-          title: "Praca bota", options: rows.map(a => ({ title: `${a.key} · ${a.status}`, description: a.error ?? `Runda ${a.round} · ${a.phase}`, value: a.key })),
+          title: "Bot tasks", options: rows.map(a => ({ title: `${a.key} · ${a.status}`, description: a.error ?? `Round ${a.round} · ${a.phase}`, value: a.key })),
         });
         if (!selected || stopped) return;
         const activity = states.get(selected);
         if (!activity?.sessionReady || !activity.sessionID) {
-          await context.ui.dialog.alert({ title: selected, message: activity?.error ?? "Sesja jeszcze nie wystartowała." }); return;
+          await context.ui.dialog.alert({ title: selected, message: activity?.error ?? "The session has not started yet." }); return;
         }
         await context.data.session.sync(activity.sessionID);
         if (!context.ui.tabs.focus(activity.sessionID)) context.ui.router.navigate({ type: "session", sessionID: activity.sessionID });

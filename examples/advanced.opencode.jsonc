@@ -17,7 +17,7 @@
           }
         ],
         "routes": {
-          "@d3ckerbot": {
+          "@opencodebot": {
             "agent": "build",
             "model": { "providerID": "YOUR_PROVIDER_ID", "id": "YOUR_MODEL_ID" }
           }
