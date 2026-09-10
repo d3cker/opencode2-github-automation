@@ -1,89 +1,180 @@
-# OpenCode 2 Automation
+# OpenCode 2 GitHub Automation
 
-Jedna paczka: scheduler + GitHub dispatcher.
+A scheduler and GitHub dispatcher in one package, built for **OpenCode 2**.
 
-`@d3ckerbot` w issue → komentarz z planem → poprawka → testy → PR.
+`@d3ckerbot` in an issue → acknowledgement and plan → implementation → verification → pull request.
 
-## Instalacja z repozytorium
+The model chooses each new PR title from the issue and completed-work summary.
+There is no fixed `Fix` prefix. The chosen title is saved before publication and
+reused if publication needs a retry.
 
-**OpenCode 2**, Node.js 22+, npm i Git. Sprawdzona wersja OpenCode:
-`0.0.0-beta-19398`. Model i dostęp do GitHuba muszą działać na danej maszynie.
+## Requirements
 
-Po sklonowaniu źródeł i docelowego projektu wystarczy:
+- OpenCode 2 with a working model. Tested with `0.0.0-beta-19398`.
+- Node.js 22+, npm, and Git.
+- GitHub authentication through `gh auth login`, or `GITHUB_TOKEN`/`GH_TOKEN`
+  in the server environment.
+- Permission to comment, push branches, and create PRs in the target repository.
+- A target repository with a GitHub `origin`, an existing default-branch commit,
+  and issues enabled.
+
+The package is installed from source; publishing to npm is unnecessary.
+`private: true` prevents accidental publication while still allowing `npm pack`.
+
+## Global installation: configure projects later
+
+On macOS or Linux with Bash, clone and build the plugin:
 
 ```bash
-bash /absolute/path/to/opencode2-plugin/scripts/install-local.sh /absolute/path/to/project
+git clone https://github.com/d3cker/opencode2-github-automation.git "$HOME/opencode2-github-automation"
+cd "$HOME/opencode2-github-automation"
+npm ci
+npm run build
 ```
 
-Instalator buduje lokalną paczkę i dodaje plugin serwera oraz interfejsu do
-projektu. Pyta o model; Enter przy pytaniu o testy pozwala je pominąć.
-Przy aktualizacji zachowuje istniejącą konfigurację. Nie restartuje serwisu.
+Add the server and terminal UI entrypoints to OpenCode's global plugin directory:
 
-**[Pełna instrukcja: wypchnięcie źródeł i instalacja na drugiej maszynie](docs/installation.md)**
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot"
+printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/index.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/index.js"
+printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/tui.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/d3ckerbot/tui.js"
+```
 
-Nie trzeba publikować paczki w npm. Repozytorium zawiera źródła i lockfile;
-archiwum instalacyjne powstaje lokalnie. `private: true` blokuje `npm publish`.
+These commands create loader files; do not overwrite them if you have customized
+existing loaders at those paths. Keep the source directory in place: the global
+installation imports its compiled files directly.
 
-Tytuł każdego nowego PR-a dobiera model po zakończeniu pracy, na podstawie
-zgłoszenia i podsumowania wykonanej zmiany. Nie ma stałego prefiksu `Fix`.
-Tytuł jest zapisywany przed publikacją i zachowywany przy ponowieniu próby.
+If OpenCode's service is running, restart it when sessions are idle:
 
-## Podgląd pracy i kolejne komentarze
-
-Gdy sesja startuje, w otwartym OpenCode 2 pojawia się powiadomienie i karta
-w tle. Komenda `/bot` pokazuje zadania i pozwala otworzyć sesję. Jeśli karty
-są wyłączone, sesję nadal otworzysz przez `/bot`.
-
-Nowy komentarz uprawnionego autora w obsługiwanym issue uruchamia kolejną
-rundę: odpowiedź z planem, poprawka i push do tego samego otwartego PR-a.
-Nie trzeba ponawiać wzmianki. Komentarze podczas pracy czekają na następną
-rundę. Wzmianka w komentarzu może też rozpocząć obsługę nowego issue.
-Edycje komentarzy i komentarze w review PR-a nie są obsługiwane.
-Zamknięty lub scalony PR blokuje dalszą rundę.
-
-Przy aktualizacji starszej lokalnej instalacji zainstaluj nową paczkę i wykonaj:
-
-```sh
-./.opencode/node_modules/.bin/opencode2-automation upgrade
+```bash
 opencode2 service restart
 ```
 
-`upgrade` dodaje interfejs i zachowuje konfigurację. Otwórz ponownie klienta
-OpenCode 2, aby załadować nowy komponent interfejsu.
+Reopen the terminal client to load the UI component. The scheduler remains
+inactive in projects without `.opencode/automation.json`.
 
-## Inny projekt lub model
+## Configure a project after global installation
 
-Jeśli nie można wykryć testów, konfigurator zapyta o komendę. **Enter pomija
-testy** i zapisuje `check: false`. Możesz też przekazać `--skip-tests`, aby
-pominąć pytanie. PR wyraźnie informuje wtedy, że testy nie zostały uruchomione;
-sprawdzenia spójności Git i wymaganie rzeczywistej poprawki pozostają aktywne.
-Możesz również
-skonfigurować projekt bez pytań:
+Run the wizard from the root of the repository the bot should work on.
+Replace the example target path with your checkout's absolute path:
 
-```sh
-opencode2-automation init --model provider/model --check pytest
+```bash
+cd /absolute/path/to/your-project
+node "$HOME/opencode2-github-automation/dist/setup.js" init
 ```
 
-Opcjonalne ustawienia w `.opencode/automation.json`: `trigger`, `everySeconds`,
-`check` (tablica argumentów komendy) i `authors` (loginy GitHuba).
-Domyślny znacznik to `@d3ckerbot`. Zmienisz go, dodając np.
-`"trigger": "@mojbot"` do tego pliku i restartując serwis.
-Konfigurator nie nadpisuje istniejącego pliku.
+Use `init` without `--local` for the global installation. The wizard asks for
+an OpenCode 2 model identifier (`provider/model`), detects the GitHub repository,
+default branch, authenticated account, and supported project test command.
+If it asks for a test command, press Enter to skip tests.
 
-Po instalacji dostępne są także `opencode2-automation status`, `scan`, `pause`
-i `resume`, uruchamiane w katalogu repozytorium. Pauza zatrzymuje nowe skany;
-przyjęte już zadania pozostają w kolejce.
+The wizard creates `.opencode/automation.json` and never overwrites an existing
+configuration. After configuration, restart an already-running service when it
+is idle and reopen the project:
 
-Szczegóły kolejki, retry, uprawnień, ograniczeń i osobnego użycia obu pluginów:
-[dokumentacja zaawansowana](docs/advanced.md).
+```bash
+opencode2 service restart
+opencode2 /absolute/path/to/your-project
+```
 
-## Dla autora paczki
+Create an issue containing `@d3ckerbot`. Polling runs once a minute and also
+considers existing matching issues. By default, only the authenticated GitHub
+user can request work.
 
-```sh
+## Configuration
+
+A minimal configuration is:
+
+```json
+{
+  "model": "provider/model"
+}
+```
+
+Use a model available in your own OpenCode 2 installation. Optional fields:
+
+| Field | Purpose |
+| --- | --- |
+| `trigger` | Mention that starts work; defaults to `@d3ckerbot`. |
+| `everySeconds` | Polling interval; defaults to 60 seconds. |
+| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
+| `authors` | GitHub usernames allowed to request work. |
+
+When tests are skipped, the PR explicitly reports that automated tests were not
+run. Git consistency checks and the requirement for an actual change remain.
+Restart the service while idle after changing configuration.
+
+For noninteractive setup:
+
+```bash
+cd /absolute/path/to/your-project
+node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests
+```
+
+## Follow progress and continue work
+
+Starting a session shows a notification and opens a background tab when tabs
+are enabled. Use `/bot` to list tasks and open a session.
+
+A new comment from an authorized author on a tracked issue starts another round:
+acknowledgement, implementation, and a push to the same open PR. The mention does
+not need to be repeated. Comments received during execution wait for the next
+round. A mention in an authorized comment can also start work on an untracked issue.
+
+Edits to existing comments and PR review comments are not supported. Closing the
+issue or closing/merging the PR blocks further rounds.
+
+Management commands run from the target repository:
+
+```bash
+cd /absolute/path/to/your-project
+node "$HOME/opencode2-github-automation/dist/setup.js" status
+node "$HOME/opencode2-github-automation/dist/setup.js" scan
+node "$HOME/opencode2-github-automation/dist/setup.js" pause
+node "$HOME/opencode2-github-automation/dist/setup.js" resume
+```
+
+Pausing stops scheduled scans; it does not cancel accepted tasks or active sessions.
+Do not run independent bots on two machines against the same issues: they do not
+share queue ownership across machines.
+
+## Alternative: install only in one project
+
+If you have not installed the plugin globally, the local installer builds,
+packs, and installs it inside a target checkout:
+
+```bash
+bash "$HOME/opencode2-github-automation/scripts/install-local.sh" /absolute/path/to/your-project
+```
+
+It prompts for configuration on first installation and preserves existing settings
+on upgrades. It does not restart OpenCode. Use either global or project-local
+installation; do not enable both for the same project.
+
+## Updating a global installation
+
+```bash
+git -C "$HOME/opencode2-github-automation" pull --ff-only
+cd "$HOME/opencode2-github-automation"
+npm ci
+npm run build
+```
+
+Restart the service while idle. Reopen terminal clients after UI changes.
+Project settings and queues are preserved.
+
+## Development
+
+```bash
 npm ci
 npm run check
 npm pack
 ```
 
-`npm pack` kompiluje źródła i tworzy archiwum instalacyjne. Publikacja do npm
-jest zablokowana przez `private: true`. Plugin używa wyłącznie SDK OpenCode 2; wymaga Node.js 22+.
+`npm run check` runs type checking, tests, and a build. `npm pack` produces a local
+installation archive. Build artifacts, dependencies, and local credentials are
+excluded from the source repository.
+
+Additional documentation (currently in Polish):
+- [Moving the source and installing on another machine](docs/installation.md)
+- [Advanced configuration, retries, permissions, and separate plugins](docs/advanced.md)
