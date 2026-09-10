@@ -1,0 +1,46 @@
+{
+  "name": "opencode2-automation",
+  "version": "0.3.1",
+  "description": "Issue-to-PR automation for OpenCode 2 with a scheduler and GitHub dispatcher",
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "docs/advanced.md"
+  ],
+  "bin": {
+    "opencode2-automation": "./dist/setup.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js",
+    "./scheduler": "./dist/plugins/scheduler.js",
+    "./github": "./dist/plugins/github.js",
+    "./rpc": "./dist/rpc.js"
+  },
+  "scripts": {
+    "prepack": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "install-local": "bash scripts/install-local.sh"
+  },
+  "dependencies": {
+    "@opencode/client": "0.0.0-beta-19398",
+    "@opencode/plugin": "0.0.0-beta-19398",
+    "proper-lockfile": "^4.1.2",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "private": true
+}

@@ -1,0 +1,223 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { type GithubOptions, type Repository, Route, matchRoute } from "./config.js";
+import { GithubError, Issue, Comment, type Pull } from "./github.js";
+import { Serial, redact, type Store } from "./state.js";
+import { activityOf, type Activity } from "./activity.js";
+
+const Phase = z.enum(["queued", "analyzing", "commented", "running", "verifying", "publishing", "pr_opened"]);
+export const Task = z.object({
+  key: z.string(), repo: z.string(), issue: Issue, route: Route.optional(),
+  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done"]),
+  attempts: z.number(), nextAt: z.number(), createdAt: z.number(),
+  analysis: z.string().optional(), commentID: z.number().optional(),
+  branch: z.string(), worktree: z.string().optional(), baseSha: z.string().optional(),
+  sessionID: z.string().optional(), promptAttempted: z.boolean().optional(),
+  sessionReady: z.boolean().optional(), round: z.number().int().positive().optional(),
+  source: z.enum(["issue", "comment"]).optional(),
+  feedback: z.array(Comment).optional(), pendingFeedback: z.array(Comment).optional(), commentCursor: z.number().optional(),
+  previousSessionID: z.string().optional(),
+  checks: z.array(z.string()).optional(), commit: z.string().optional(),
+  prTitle: z.string().min(1).max(240).optional(),
+  pr: z.object({ number: z.number(), html_url: z.string(), state: z.string() }).optional(), error: z.string().optional(),
+});
+export type Task = z.infer<typeof Task>;
+export const Queue = z.object({ version: z.literal(1), tasks: z.array(Task) });
+export type Queue = z.infer<typeof Queue>;
+export class Blocked extends Error {}
+
+export interface GithubPort {
+  issues(repo: string): Promise<Issue[]>;
+  issue(repo: string, number: number): Promise<Issue>;
+  comments(repo: string, number: number): Promise<Comment[]>;
+  ensureComment(repo: string, number: number, marker: string, body: string): Promise<number>;
+  findPull(repo: string, branch: string): Promise<Pull | undefined>;
+  ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull>;
+}
+export interface Executor {
+  analyze(task: Task): Promise<string>;
+  title(task: Task): Promise<string>;
+  prepare(task: Task, repo: Repository): Promise<{ worktree: string; baseSha: string }>;
+  run(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>): Promise<void>;
+  verify(task: Task, repo: Repository): Promise<{ checks: string[]; commit: string }>;
+  push(task: Task, repo: Repository): Promise<void>;
+  cancel(task: Task): Promise<void>;
+}
+
+export class Dispatcher {
+  private queue: Queue = { version: 1, tasks: [] };
+  private serial = new Serial();
+  private scanning?: Promise<{ queued: number; ignored: number }>;
+  private working?: Promise<void>;
+  private maintenance?: Promise<boolean>;
+  constructor(private options: GithubOptions, private store: Store<Queue>, private github: GithubPort, private executor: Executor, private signal: AbortSignal, private secrets: string[] = [], private now = Date.now, private notify: (activity: Activity) => Promise<void> = async () => {}) {}
+  async init() { this.queue = await this.store.load(); }
+  status() { return structuredClone(this.queue.tasks); }
+  activity() { return this.queue.tasks.map(activityOf); }
+  private async update(task: Task, patch: Partial<Task>) {
+    this.signal.throwIfAborted();
+    let announce = false;
+    await this.serial.run(async () => {
+      announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed"].includes(patch.status));
+      Object.assign(task, patch);
+      await this.store.save(this.queue);
+    });
+    if (announce) await this.notify(activityOf(task)).catch(error => console.error("Activity notification failed", redact(error, this.secrets)));
+  }
+  scan() {
+    if (this.scanning) return this.scanning;
+    this.scanning = this.scanOnce().finally(() => { this.scanning = undefined; });
+    return this.scanning;
+  }
+  private async scanOnce() {
+    let queued = 0, ignored = 0;
+    for (const repo of this.options.repositories) {
+      const issues = await this.github.issues(repo.repo);
+      for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo)) {
+        if (!issues.some(i => i.number === tracked.issue.number)) issues.push(await this.github.issue(repo.repo, tracked.issue.number));
+      }
+      for (const issue of issues) {
+        this.signal.throwIfAborted();
+        if (issue.pull_request) { ignored++; continue; }
+        const key = `${repo.repo.toLowerCase()}#${issue.number}`;
+        const existing = this.queue.tasks.find(t => t.key === key);
+        if (!existing && issue.state !== "open") { ignored++; continue; }
+        const comments = await this.github.comments(repo.repo, issue.number);
+        const authorized = comments.filter(c => this.authorized(c.user.login, repo.allowedAuthors) && c.user.type !== "Bot" && c.body.trim() && !c.body.includes("<!-- opencode2:"));
+        const cursor = Math.max(0, ...comments.map(c => c.id));
+        if (existing) {
+          // For queues from older versions, comments after the bot's acknowledgement are new feedback.
+          await this.serial.run(async () => {
+            const previousCursor = existing.commentCursor ?? existing.commentID ?? 0;
+            const fresh = authorized.filter(c => c.id > previousCursor);
+            Object.assign(existing, { pendingFeedback: [...existing.pendingFeedback ?? [], ...fresh], commentCursor: Math.max(cursor, previousCursor) });
+            await this.store.save(this.queue);
+            if (fresh.length) queued++; else ignored++;
+          });
+          continue;
+        }
+        let route: Route | undefined, error: string | undefined;
+        let source: "issue" | "comment" = "issue";
+        try {
+          if (this.authorized(issue.user.login, repo.allowedAuthors)) route = matchRoute(issue.body ?? "", this.options.routes);
+          if (!route) {
+            for (const comment of authorized) {
+              const selected = matchRoute(comment.body, this.options.routes);
+              if (selected) { route = selected; source = "comment"; }
+            }
+          }
+        }
+        catch (caught) { error = redact(caught); }
+        if (!route && !error) { ignored++; continue; }
+        await this.serial.run(async () => {
+          const digest = createHash("sha256").update(key).digest("hex").slice(0, 12);
+          this.queue.tasks.push({ key, repo: repo.repo, issue, route, error, source, feedback: authorized, pendingFeedback: [], commentCursor: cursor, round: 1, phase: "queued", status: error ? "blocked" : "ready", attempts: 0, nextAt: this.now(), createdAt: this.now(), branch: `automation/issue-${issue.number}-${digest}` });
+          await this.store.save(this.queue);
+        });
+        queued++;
+      }
+    }
+    return { queued, ignored };
+  }
+  private authorized(login: string, authors: string[]) { return authors.some(a => a.toLowerCase() === login.toLowerCase()); }
+  tick(): Promise<void> {
+    if (this.maintenance) return Promise.resolve();
+    if (this.working) return this.working;
+    this.working = this.workOnce().finally(() => { this.working = undefined; });
+    return this.working;
+  }
+  private async workOnce() {
+    await this.serial.run(async () => {
+      const finished = this.queue.tasks.find(t => t.status === "done" && t.pendingFeedback?.length);
+      if (!finished) return;
+      Object.assign(finished, { round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
+        phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
+        sessionID: undefined, sessionReady: false, promptAttempted: false, checks: undefined, commit: undefined, error: undefined });
+      await this.store.save(this.queue);
+    });
+    const resumable = this.queue.tasks.filter(t => ["ready", "retry_wait"].includes(t.status));
+    // A transport timeout may leave a server session running. Reconcile it before starting another issue.
+    const activeSession = resumable.find(t => t.phase === "running" && t.sessionID);
+    const task = activeSession ?? resumable.find(t => t.nextAt <= this.now());
+    if (task && task.nextAt > this.now()) return;
+    if (!task) return;
+    const repo = this.options.repositories.find(r => r.repo === task.repo);
+    try {
+      if (!repo) throw new Blocked("Repository removed from configuration");
+      if (!task.route) throw new Blocked("No unambiguous execution route");
+      await this.update(task, { status: "ready", error: undefined });
+      const followup = (task.round ?? 1) > 1;
+      if (["queued", "analyzing", "commented"].includes(task.phase)) {
+        const latest = await this.github.issue(task.repo, task.issue.number);
+        if (latest.state !== "open") throw new Blocked("Issue is closed; reopen it before continuing");
+        if (followup) {
+          const pr = await this.github.findPull(task.repo, task.branch);
+          if (!pr || pr.state !== "open") throw new Blocked("The original PR is closed or merged; reopen it or create a new issue");
+          if (!task.feedback?.every(c => this.authorized(c.user.login, repo.allowedAuthors))) throw new Blocked("Feedback author no longer authorized");
+        } else if (task.source !== "comment" && !this.authorized(latest.user.login, repo.allowedAuthors)) throw new Blocked("Issue author no longer authorized");
+        if (!followup && task.source === "comment" && !task.feedback?.some(c => this.authorized(c.user.login, repo.allowedAuthors) && matchRoute(c.body, this.options.routes))) throw new Blocked("No authorized routing comment remains in the task");
+        const route = followup || task.source === "comment" ? task.route : matchRoute(latest.body ?? "", this.options.routes);
+        if (!route) throw new Blocked("Routing tag removed");
+        if (task.analysis && (latest.body !== task.issue.body || latest.title !== task.issue.title || JSON.stringify(route) !== JSON.stringify(task.route))) throw new Blocked("Issue or route changed after analysis; review before restarting");
+        await this.update(task, { issue: latest, route });
+      }
+      if (task.phase === "queued" || task.phase === "analyzing") {
+        await this.update(task, { phase: "analyzing" });
+        if (!task.analysis) await this.update(task, { analysis: await this.executor.analyze(task) });
+        const commentID = await this.github.ensureComment(task.repo, task.issue.number, `<!-- opencode2:${task.key}:analysis:v${task.round ?? 1} -->`, task.analysis!);
+        await this.update(task, { commentID, phase: "commented", attempts: 0 });
+      }
+      if (task.phase === "commented") {
+        if (!task.commentID) throw new Blocked("Missing confirmed analysis comment");
+        const workspace = await this.executor.prepare(task, repo);
+        await this.update(task, { ...workspace, phase: "running", attempts: 0 });
+      }
+      if (task.phase === "running") {
+        await this.executor.run(task, patch => this.update(task, patch));
+        await this.update(task, { phase: "verifying", attempts: 0 });
+      }
+      if (task.phase === "verifying") {
+        const result = await this.executor.verify(task, repo);
+        await this.update(task, { ...result, phase: "publishing", attempts: 0 });
+      }
+      if (task.phase === "publishing") {
+        let pr = await this.github.findPull(task.repo, task.branch);
+        if (followup && (!pr || pr.state !== "open")) throw new Blocked("The original PR is no longer open; changes remain in the worktree");
+        if (followup && pr) await this.executor.push(task, repo);
+        if (!pr) {
+          if (!task.prTitle) await this.update(task, { prTitle: await this.executor.title(task) });
+          if ((await this.github.issue(task.repo, task.issue.number)).state !== "open") throw new Blocked("Issue closed before PR publication");
+          await this.executor.push(task, repo);
+          pr = await this.github.ensurePull(task.repo, task.branch, repo.baseBranch, task.prTitle!, `${task.analysis}\n\nCloses #${task.issue.number}\n\nChecks:\n${task.checks?.length ? task.checks.map(c => `- ${c}`).join("\n") : "- Automated tests were not run: no test command configured. Only Git consistency checks were performed."}\n\nOpenCode session: ${task.sessionID}\nCommit: ${task.commit}`);
+        }
+        await this.update(task, { pr, phase: "pr_opened", status: "done", attempts: 0 });
+      }
+    } catch (error) {
+      if (this.signal.aborted) return;
+      const attempts = task.attempts + 1;
+      const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
+      await this.update(task, { attempts, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
+    }
+  }
+  async retry(key: string, restartSession: boolean) {
+    if (this.working || this.maintenance) throw new Error("Worker is busy; retry after it finishes");
+    this.maintenance = this.retryOnce(key, restartSession);
+    try { return await this.maintenance; }
+    finally { this.maintenance = undefined; }
+  }
+  private async retryOnce(key: string, restartSession: boolean) {
+    const task = this.queue.tasks.find(t => t.key === key);
+    if (!task || !["blocked", "failed"].includes(task.status)) return false;
+    if (restartSession) {
+      await this.executor.cancel(task);
+      await this.update(task, { sessionID: undefined, promptAttempted: undefined, phase: task.commentID ? "commented" : "queued", analysis: task.commentID ? task.analysis : undefined });
+    }
+    if (!task.route) {
+      const latest = await this.github.issue(task.repo, task.issue.number);
+      await this.update(task, { issue: latest, route: matchRoute(latest.body ?? "", this.options.routes) });
+    }
+    await this.update(task, { status: "ready", attempts: 0, nextAt: this.now(), error: undefined });
+    return true;
+  }
+  async settle() { await Promise.allSettled([this.scanning, this.working, this.maintenance]); }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode2-plugin/dist/plugins/github.js",
+      "options": {
+        "ownerDirectory": "/absolute/path/to/owner-project",
+        "stateDirectory": "/absolute/path/to/private-automation-state",
+        "tokenEnv": "GITHUB_TOKEN",
+        "repositories": [
+          {
+            "repo": "owner/repository",
+            "directory": "/absolute/path/to/repository-checkout",
+            "baseBranch": "main",
+            "allowedAuthors": ["your-github-login"],
+            "checks": [["npm", "ci"], ["npm", "test"]]
+          }
+        ],
+        "routes": {
+          "@d3ckerbot": {
+            "agent": "build",
+            "model": { "providerID": "YOUR_PROVIDER_ID", "id": "YOUR_MODEL_ID" }
+          }
+        },
+        "workerEverySeconds": 5,
+        "sessionTimeoutSeconds": 3600,
+        "commandTimeoutSeconds": 600,
+        "maxAttempts": 5
+      }
+    },
+    {
+      "package": "/absolute/path/to/opencode2-plugin/dist/plugins/scheduler.js",
+      "options": {
+        "ownerDirectory": "/absolute/path/to/owner-project",
+        "stateDirectory": "/absolute/path/to/private-automation-state",
+        "jobs": [
+          {
+            "id": "github-issues",
+            "everySeconds": 60,
+            "rpcID": "automation.github",
+            "method": "scan",
+            "input": {}
+          }
+        ]
+      }
+    }
+  ]
+}

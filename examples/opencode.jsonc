@@ -1,0 +1,8 @@
+{
+  "plugins": [
+    {
+      "package": "opencode2-automation",
+      "options": { "model": "deepseek/deepseek-chat" }
+    }
+  ]
+}
