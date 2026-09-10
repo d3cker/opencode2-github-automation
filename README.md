@@ -98,7 +98,9 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 | `trigger` | Mention that starts work; defaults to `@d3ckerbot`. |
 | `everySeconds` | Polling interval; defaults to 60 seconds. |
 | `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
-| `authors` | GitHub usernames allowed to request work. |
+| `authors` | GitHub usernames allowed to request work and authorize merging (merge also requires repository write access). |
+| `signature` | Signature appended to every posted comment and PR description; defaults to `your-github-login[OpenCode2]`. |
+| `autoMerge` | Automatic merge settings: `enabled` (default `true`), `method` (default `squash`), and exact approval `comments`. |
 
 When tests are skipped, the PR explicitly reports that automated tests were not
 run. Git consistency checks and the requirement for an actual change remain.
@@ -110,6 +112,49 @@ For noninteractive setup:
 cd /absolute/path/to/your-project
 node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests
 ```
+
+## Automatic merge and message signatures
+
+Example project configuration:
+
+```json
+{
+  "model": "provider/model",
+  "check": false,
+  "signature": "d3cker[OpenCode2]",
+  "autoMerge": {
+    "enabled": true,
+    "method": "squash",
+    "comments": ["/merge", "lgtm, merge", "jest git, możesz mergować", "jest git, można mergować"]
+  }
+}
+```
+
+For a PR created by this bot, either approve the current published commit using
+GitHub's **Approve** review, or post one of the configured full-message phrases
+in the PR conversation. Matching ignores case, repeated whitespace, and final
+periods/exclamation marks. Arbitrary positive prose, quoted commands, negations,
+and inline code review comments are not interpreted as merge instructions.
+
+The approving account must be in `authors` (by default, the authenticated user)
+and have write, maintain, or admin permission on the repository. GitHub does not
+allow authors to approve their own PRs; use a configured comment in that case.
+Outstanding change requests block merge. The PR must be open, non-draft, and
+reported as clean and mergeable by GitHub. The merge request includes the exact
+verified head SHA; a changed branch cannot be merged using an older approval.
+The bot does not request a protection bypass. Configure required checks and review
+rules on GitHub for your repository's policy.
+
+Approvals must be newer than the bot's latest publication. On upgrade, old tasks
+start watching for new approvals; historical approvals do not cause a merge.
+Pending issue feedback is processed before attempting a merge. Merge failures
+are retried at intervals of at least 60 seconds and appear as `mergeError` in
+`status` and in `/bot`. Successful merges receive a signed PR comment.
+
+Signatures are appended to issue comments, PR descriptions, and merge
+acknowledgements. They identify the message in its text; GitHub still attributes
+posts to the account authenticated by your token. Existing posts are not rewritten.
+Set `"autoMerge": { "enabled": false }` to disable automatic merging.
 
 ## Follow progress and continue work
 

@@ -20,7 +20,7 @@ export default Plugin.define({
     const release = await acquire(options.stateDirectory, "github", error => controller.abort(error));
     const executor = new OpenCodeExecutor(ctx, options, controller.signal);
     let publish: (activity: Activity) => Promise<void> = async () => {};
-    const dispatcher = new Dispatcher(options, new JsonStore(join(options.stateDirectory, "queue.json"), Queue, () => ({ version: 1, tasks: [] })), new Github(token, controller.signal), executor, controller.signal, [token], Date.now, activity => publish(activity));
+    const dispatcher = new Dispatcher(options, new JsonStore(join(options.stateDirectory, "queue.json"), Queue, () => ({ version: 1, tasks: [] })), new Github(token, controller.signal, fetch, options.signature), executor, controller.signal, [token], Date.now, activity => publish(activity));
     try {
       await dispatcher.init();
       const registration = await ctx.rpc.register(GithubRpc, {
