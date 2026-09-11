@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { botPrompt } from "../src/prompt.js";
-import { requestedBase } from "../src/branch.js";
+import { baseChoice, branchText } from "../src/branch.js";
 
 test("the bundled bot instructions are always loaded and custom Markdown is re-read", async () => {
   const dir = await mkdtemp(join(tmpdir(), "oc2-prompt-"));
@@ -17,14 +17,21 @@ test("the bundled bot instructions are always loaded and custom Markdown is re-r
     await rm(join(dir, "bot.md")); await assert.rejects(botPrompt(options), /ENOENT/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test("base branch directives reject option injection and malformed refs", () => {
-  assert.equal(requestedBase(["hello", "/base feature/one"], "main"), "feature/one");
-  assert.equal(requestedBase(["Base branch: develop", "/base release/next"], "main"), "release/next");
-  for (const bad of ["--upload-pack=evil", "../../main", "bad//ref", "ref.lock"]) assert.throws(() => requestedBase([`/base ${bad}`], "main"));
-  assert.equal(requestedBase(["> /base injected"], "main"), "main");
+test("branch selection requires literal evidence and never accepts an invented ref", () => {
+  const inputs = [{ text: "Please use branch release/next." }];
+  const selection = { kind: "branch", branch: "release/next", source: 0, quote: inputs[0]!.text };
+  assert.deepEqual(baseChoice(JSON.stringify(selection), inputs, "main"), { kind: "branch", branch: "release/next" });
+  for (const patch of [{ branch: "release" }, { source: 8 }, { quote: "use master" }]) {
+    assert.throws(() => baseChoice(JSON.stringify({ ...selection, ...patch }), inputs, "main"), /not supported/);
+  }
+  assert.deepEqual(baseChoice('{"kind":"default"}', inputs, "main"), { kind: "branch", branch: "main" });
+  assert.throws(() => baseChoice("use develop", inputs, "main"));
+  const invalid = [{ text: "Use branch ref.lock" }];
+  assert.equal(baseChoice(JSON.stringify({ kind: "branch", branch: "ref.lock", source: 0, quote: invalid[0]!.text }), invalid, "main").kind, "question");
 });
 
-test("branch directives accept inline code but ignore quoted and fenced examples", () => {
-  assert.equal(requestedBase(["Base branch: `release/next`"], "main"), "release/next");
-  assert.equal(requestedBase(["> /base quoted\n```text\n/base example\n```\n~~~\n/base another-example\n~~~"], "main"), "main");
+test("branch requests retain prose and optional directives but ignore quoted and fenced examples", () => {
+  assert.equal(branchText("Please use branch `develop`."), "Please use branch `develop`.");
+  assert.equal(branchText("Base branch: release/next\n/base develop"), "Base branch: release/next\n/base develop");
+  assert.equal(branchText("> /base quoted\n```text\n/base example\n```\n~~~\nuse branch another-example\n~~~\nUse branch develop instead."), "Use branch develop instead.");
 });

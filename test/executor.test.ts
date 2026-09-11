@@ -104,6 +104,9 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     // Only identity lookup is substituted; fetch, worktree, checks, commit and push use real git.
     const git = new GitWorkspace(state, (cwd, argv) => argv.join(" ") === "git remote get-url origin" ? Promise.resolve("git@github.com:owner/repo.git") : run(cwd, argv));
     const repo = { ...options.repositories[0]!, baseBranch: "release/next", directory: checkout, checks: [[process.execPath, "-e", 'if (require("fs").readFileSync("counter.txt", "utf8") !== "fixed\\n") process.exit(1)']] };
+    assert.equal(await git.hasBranch(repo, "release/next"), true);
+    assert.equal(await git.hasBranch(repo, "release"), false);
+    assert.equal(await git.hasBranch(repo, "missing"), false);
     const t = task(); Object.assign(t, await git.prepare(t, repo));
     assert.equal(t.baseSha, selectedBase);
     assert.match(await readFile(join(t.worktree!, "release.txt"), "utf8"), /release-only/);
@@ -170,4 +173,21 @@ test("issue answers resume the same session once and retry uncertain delivery wi
   ctx.session.wait = async () => { t.question = { id: "q2", sessionID: "ses_main", text: "Next?" }; throw new Error("waiting connection lost"); };
   await assert.rejects(executor.run(t, checkpoint), WaitingForAnswer);
   assert.equal(interrupted, true);
+});
+
+test("base selection uses the configured model for natural-language requests and requires a structured decision", async () => {
+  let response: unknown = { kind: "branch", branch: "develop", source: 0, quote: "Please use branch develop." };
+  const prompts: string[] = [];
+  const ctx = { generate: { text: async (input: any) => { assert.deepEqual(input.model, route.model); prompts.push(input.prompt); return { text: JSON.stringify(response) }; } } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal);
+  for (const request of ["Please use branch develop.", "Użyj brancha develop.", "Work from develop for this change.", "/base develop"]) {
+    response = { kind: "branch", branch: "develop", source: 0, quote: request };
+    assert.deepEqual(await executor.selectBase(task(), options.repositories[0]!, [{ text: request }]), { kind: "branch", branch: "develop" });
+    assert.ok(prompts.at(-1)!.includes(request));
+  }
+  assert.match(prompts[0]!, /Later clear corrections supersede/); assert.match(prompts[0]!, /Honor negation/);
+  response = { kind: "question", question: "Which of these two branches should I use?" };
+  assert.equal((await executor.selectBase(task(), options.repositories[0]!, [{ text: "Use develop or staging" }])).kind, "question");
+  response = { kind: "branch", branch: "invented", source: 0, quote: "invented" };
+  await assert.rejects(executor.selectBase(task(), options.repositories[0]!, [{ text: "Use develop" }]), /not supported/);
 });

@@ -28,7 +28,7 @@ OpenCode service must be running for polling to work.
 | --- | --- |
 | `ownerDirectory` | Absolute path of the checkout that owns automation. Worker worktrees do not activate another scheduler. |
 | `stateDirectory` | Shared location for queues, locks, and worktrees. Keep it consistent across components and restarts. |
-| `repositories` | Repositories with existing local checkouts, base branches, allowed authors, and checks. |
+| `repositories` | Repositories with existing local checkouts, default base branches, allowed authors, and checks. A natural-language request can override the base before work starts. |
 | `allowedAuthors` | GitHub users authorized to request work and approve merging. Merging also requires repository write access. |
 | `checks` | Arrays of executable arguments, e.g. `[["npm", "test"]]`. `[]` skips automated tests and reports that in the PR. No implicit shell. |
 | `routes` | Maps full mentions to agents and models available in OpenCode. |

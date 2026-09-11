@@ -26,18 +26,29 @@ No terminal UI is needed to answer in GitHub.
 
 ## Base branches
 
-Set `"baseBranch": "develop"` in the project JSON, or put a directive in the
-issue body or an authorized comment included when work is accepted:
+Write your preference in the issue or an authorized comment in ordinary language:
 
 ```text
-@opencodebot Add an export button.
-/base release/next
+@opencodebot Add an export button. Please use branch release/next.
 ```
 
-`Base branch: release/next` on its own line also works. The last explicit
-directive wins over the project setting; without either, the GitHub default
-branch is used. Arbitrary prose and quoted directives are not branch commands.
-The branch must exist on `origin`; a missing branch fails without falling back.
+The configured main model interprets the intended base, including requests in
+Polish and other languages it understands. No special command syntax is required.
+For example, "work from develop" selects `develop`; "do not use develop; use
+release/next instead" selects `release/next`. Clear later corrections take
+precedence. Quoted messages and fenced code examples are excluded from selection.
+
+`/base release/next` and `Base branch: release/next` remain optional shortcuts.
+`baseBranch` in the JSON is the default when no preference is given; if omitted,
+the GitHub default branch is used. A selected name must occur in authorized user
+text and must exist on `origin`; the model cannot invent a replacement branch.
+
+If the request is ambiguous, or the branch does not exist, the bot asks in the
+issue after its initial acknowledgement. No worktree or coding session is created
+until the base is resolved. Reply naturally (or with just the branch name) from
+an account in `authors`. Questions and replies survive service restarts. An
+unavailable Git connection or invalid model response causes a retry, never a
+silent fallback to the default branch.
 
 The dispatcher fetches that branch, creates a task branch/worktree from its
 commit, and targets the same base in the PR. This choice stays pinned through

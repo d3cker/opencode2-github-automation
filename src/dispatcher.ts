@@ -3,10 +3,10 @@ import { z } from "zod";
 import { type GithubOptions, type Repository, Route, matchRoute } from "./config.js";
 import { GithubError, Issue, Comment, type Pull } from "./github.js";
 import { Serial, redact, type Store } from "./state.js";
-import { requestedBase } from "./branch.js";
+import { branchText, type BranchInput, type BaseChoice } from "./branch.js";
 import { activityOf, type Activity } from "./activity.js";
 
-export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sessionID: z.string(), commentID: z.number().optional(),
+export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sessionID: z.string().optional(), purpose: z.literal("base").optional(), commentID: z.number().optional(),
   permission: z.object({ action: z.string(), resources: z.array(z.string()) }).optional(),
   answer: Comment.optional(), delivered: z.boolean().optional(), answerSent: z.boolean().optional() });
 const Phase = z.enum(["queued", "analyzing", "commented", "running", "verifying", "publishing", "pr_opened"]);
@@ -16,6 +16,7 @@ export const Task = z.object({
   attempts: z.number(), nextAt: z.number(), createdAt: z.number(),
   analysis: z.string().optional(), commentID: z.number().optional(),
   baseBranch: z.string().optional(), question: PendingQuestion.optional(),
+  baseDialogue: z.array(z.object({ question: z.string(), answer: Comment })).optional(),
   permissions: z.array(z.object({ sessionID: z.string(), action: z.string(), resources: z.array(z.string()), allow: z.boolean() })).optional(),
   helpers: z.array(z.object({ id: z.string(), parentID: z.string(), capability: z.enum(["vision", "audio"]) })).optional(),
   branch: z.string(), worktree: z.string().optional(), baseSha: z.string().optional(),
@@ -45,6 +46,8 @@ export interface GithubPort {
   ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull>;
 }
 export interface Executor {
+  selectBase(task: Task, repo: Repository, inputs: BranchInput[]): Promise<BaseChoice>;
+  hasBranch(repo: Repository, branch: string): Promise<boolean>;
   analyze(task: Task): Promise<string>;
   title(task: Task): Promise<string>;
   prepare(task: Task, repo: Repository): Promise<{ worktree: string; baseSha: string }>;
@@ -108,7 +111,7 @@ export class Dispatcher {
               const reply = authorized.find(c => c.id > q.commentID! && (!q.permission || [`/allow ${q.id}`, `/deny ${q.id}`].includes(c.body.trim())));
               if (reply) {
                 q.answer = reply;
-                if (q.permission) existing.permissions = [...existing.permissions ?? [], { sessionID: q.sessionID, ...q.permission, allow: reply.body.trim().startsWith("/allow ") }];
+                if (q.permission && q.sessionID) existing.permissions = [...existing.permissions ?? [], { sessionID: q.sessionID, ...q.permission, allow: reply.body.trim().startsWith("/allow ") }];
                 if (existing.status === "waiting") existing.status = "ready";
                 remaining = remaining.filter(c => c.id !== reply.id);
                 existing.pendingFeedback = (existing.pendingFeedback ?? []).filter(c => c.id !== reply.id);
@@ -154,7 +157,7 @@ export class Dispatcher {
     // A lost comment response must not strand a waiting question after a restart.
     for (const pending of this.queue.tasks.filter(t => t.status === "waiting" && t.question && !t.question.commentID && t.nextAt <= this.now())) {
       const q = pending.question!;
-      try { await this.question(q.sessionID, q.id, q.text, q.permission); }
+      try { await this.publishQuestion(pending, q); }
       catch (error) { if (this.signal.aborted) return; await this.update(pending, { error: redact(error, this.secrets), nextAt: this.now() + 60_000 }); }
     }
     await this.serial.run(async () => {
@@ -192,10 +195,6 @@ export class Dispatcher {
         if (task.analysis && (latest.body !== task.issue.body || latest.title !== task.issue.title || JSON.stringify(route) !== JSON.stringify(task.route))) throw new Blocked("Issue or route changed after analysis; review before restarting");
         await this.update(task, { issue: latest, route });
       }
-      if (!task.baseBranch && repo) {
-        const baseBranch = requestedBase([task.source !== "comment" ? task.issue.body ?? "" : "", ...(task.feedback ?? []).map(c => c.body)], repo.baseBranch);
-        await this.update(task, { baseBranch }); repo = { ...repo, baseBranch };
-      }
       if (task.phase === "queued" || task.phase === "analyzing") {
         await this.update(task, { phase: "analyzing" });
         if (!task.analysis) await this.update(task, { analysis: await this.executor.analyze(task) });
@@ -204,6 +203,8 @@ export class Dispatcher {
       }
       if (task.phase === "commented") {
         if (!task.commentID) throw new Blocked("Missing confirmed analysis comment");
+        if (!task.baseBranch) await this.resolveBase(task, repo);
+        repo = { ...repo, baseBranch: task.baseBranch! };
         const workspace = await this.executor.prepare(task, repo);
         await this.update(task, { ...workspace, phase: "running", attempts: 0 });
       }
@@ -235,6 +236,29 @@ export class Dispatcher {
       const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
       await this.update(task, { attempts, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
     }
+  }
+  private async resolveBase(task: Task, repo: Repository) {
+    const q = task.question;
+    if (q?.purpose === "base" && !q.delivered) {
+      if (!q.answer) { await this.publishQuestion(task, q); throw new WaitingForAnswer("Waiting for a base branch reply"); }
+      if (!this.authorized(q.answer.user.login, repo.allowedAuthors)) throw new Blocked("The branch reply author is no longer authorized");
+      await this.update(task, { baseDialogue: [...task.baseDialogue ?? [], { question: q.text, answer: q.answer }], question: { ...q, delivered: true, answerSent: true } });
+    }
+    const inputs: BranchInput[] = [
+      ...(this.authorized(task.issue.user.login, repo.allowedAuthors) ? [task.issue.title, task.issue.body ?? ""].map(text => ({ text })) : []),
+      ...(task.feedback ?? []).filter(c => this.authorized(c.user.login, repo.allowedAuthors)).map(c => ({ text: c.body })),
+      ...(task.baseDialogue ?? []).filter(d => this.authorized(d.answer.user.login, repo.allowedAuthors)).map(d => ({ text: d.answer.body, question: d.question })),
+    ].map(input => ({ ...input, text: branchText(input.text) })).filter(input => input.text);
+    let choice = await this.executor.selectBase(task, repo, inputs);
+    if (choice.kind === "branch" && !await this.executor.hasBranch(repo, choice.branch)) {
+      choice = { kind: "question", question: `Branch ${JSON.stringify(choice.branch)} does not exist on origin. Which existing branch should I use as the base? You can reply in your own words.` };
+    }
+    if (choice.kind === "question") {
+      const id = `base_${createHash("sha256").update(JSON.stringify({ key: task.key, inputs, question: choice.question })).digest("hex").slice(0, 24)}`;
+      await this.askTask(task, { id, text: choice.question, purpose: "base" });
+      throw new WaitingForAnswer("Waiting for a base branch reply");
+    }
+    await this.update(task, { baseBranch: choice.branch, ...(task.question?.purpose === "base" ? { question: undefined } : {}) });
   }
   private async mergeOnce() {
     if (!this.options.autoMerge.enabled || !this.github.mergeApproved) return;
@@ -270,11 +294,18 @@ export class Dispatcher {
   async question(sessionID: string, id: string, text: string, permission?: { action: string; resources: string[] }) {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID);
     if (!task || task.phase !== "running" || !["ready", "retry_wait", "waiting"].includes(task.status)) throw new Error("No active bot task for this session");
+    return this.askTask(task, { id, text, sessionID, ...(permission ? { permission } : {}) });
+  }
+  private async askTask(task: Task, input: z.infer<typeof PendingQuestion>) {
     let question!: z.infer<typeof PendingQuestion>;
     await this.serial.run(async () => {
-      if (!task.question || task.question.delivered) task.question = { id, text, sessionID, ...(permission ? { permission } : {}) };
+      if (!task.question || task.question.delivered) task.question = input;
       question = task.question; await this.store.save(this.queue);
     });
+    await this.publishQuestion(task, question);
+    return { id: question.id };
+  }
+  private async publishQuestion(task: Task, question: z.infer<typeof PendingQuestion>) {
     if (!question.commentID) {
       const body = `Question (${question.id})\n\n${question.text}\n\n${question.permission ? `Reply with /allow ${question.id} or /deny ${question.id}.` : "Reply in this issue to continue. Only configured authors can answer."}`;
       const marker = `<!-- opencode2:${task.key}:question:${question.id} -->`;
@@ -288,7 +319,6 @@ export class Dispatcher {
         });
       } finally { if (this.questionPosts.get(marker) === post) this.questionPosts.delete(marker); }
     }
-    return { id: question.id };
   }
   async helper(sessionID: string, callID: string, capability: "vision" | "audio") {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID);

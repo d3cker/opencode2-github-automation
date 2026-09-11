@@ -167,7 +167,7 @@ git switch codex/issue-dialogue-capabilities
 git pull --ff-only
 ```
 
-Then complete update steps 2 and 3 (`0.5.0-beta.1`). Reopen each project you want
+Then complete update steps 2 and 3 (`0.5.0-beta.2`). Reopen each project you want
 the restarted service to handle.
 
 ## 4. Remove automation from one project
@@ -302,9 +302,12 @@ if you want media support with a text-only main model.
   mention is needed. The bot enters `waiting` and resumes after the next scan.
   Permission questions require the exact `/allow QUESTION_ID` or
   `/deny QUESTION_ID` shown in the comment. Explicit OpenCode deny rules remain.
-- **Base branch:** set `baseBranch` in the JSON, or put `/base release/next`
-  on its own line in the initial issue request. The branch must exist on `origin`.
-  The worktree and PR use that base. Existing tasks keep their pinned base.
+- **Base branch:** write naturally, such as "use branch develop" or "work from
+  release/next", in the issue or an authorized comment. The configured model
+  interprets the request, including languages such as Polish. Unclear or missing
+  branches trigger a question in the issue before work starts. `baseBranch` is
+  only the default; `/base` remains an optional shortcut. Existing tasks keep
+  their pinned base.
 - **Media:** declare actual model capabilities and a helper if needed:
 
   ```json
