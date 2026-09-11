@@ -288,17 +288,19 @@ copy it to another machine and follow the `.tgz` instructions above.
 - **Pull requests:** CI runs ESLint, type checking, unit tests, a build, and a
   package installation check on Node 22 and 24. Pushes to `main`/`master` also run CI.
 - **Releases:** push a SemVer tag to build and publish a GitHub Release with the
-  `.tgz` and SHA-256 checksum. The tag controls the package version; there is no
-  need to edit `package.json` first. Tests and package installation must pass.
+  `.tgz` and SHA-256 checksum. CI verifies that the tag matches the committed
+  version in `package.json` and `package-lock.json`. Tests and package installation must pass.
 
-After the workflow files are committed and pushed, tag the commit you want to release:
+For a stable release, merge the PR first, then update your local `main` branch.
+With a clean working tree, run (replace `0.6.0` with your next unused version):
 
 ```bash
-git tag v0.5.0
-git push origin v0.5.0
+npm version 0.6.0
+git push --atomic origin HEAD v0.6.0
 ```
 
-Use your next unused version. Both `v0.5.0` and `0.5.0` are accepted; a suffix
-such as `v0.6.0-beta.1` creates a prerelease. Version changes happen only in CI,
-without a version commit or npm publication. Releases use the built-in
+`npm version` updates both manifests, creates a commit, and tags it automatically.
+The push sends the current branch and tag together. For testing, use a version
+such as `0.7.0-beta.1` on a feature branch; CI marks it as a prerelease.
+CI does not rewrite versions or publish to npm. Releases use the built-in
 `GITHUB_TOKEN`; no npm token or extra secret is needed.

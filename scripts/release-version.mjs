@@ -1,4 +1,4 @@
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile } from "node:fs/promises";
 import semver from "semver";
 
 try {
@@ -12,9 +12,9 @@ try {
   if (lock.name !== pkg.name || lock.packages?.[""]?.name !== pkg.name) {
     throw new Error("package.json and package-lock.json must describe the same root package.");
   }
-  pkg.version = lock.version = lock.packages[""].version = version;
-  await writeFile("package.json", JSON.stringify(pkg, null, 2) + "\n");
-  await writeFile("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+  if (pkg.version !== version || lock.version !== version || lock.packages[""].version !== version) {
+    throw new Error(`Release tag ${tag} must match the version in package.json and both root versions in package-lock.json. Use npm version to commit the version and create its tag before pushing.`);
+  }
   const prerelease = semver.prerelease(version) !== null;
   if (process.env.GITHUB_OUTPUT) {
     await appendFile(process.env.GITHUB_OUTPUT, `version=${version}\nprerelease=${prerelease}\n`);
