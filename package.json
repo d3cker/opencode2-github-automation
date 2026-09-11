@@ -1,13 +1,14 @@
 {
   "name": "opencode2-automation",
-  "version": "0.5.0-beta.4",
+  "version": "0.5.0-beta.5",
   "description": "Issue-to-PR automation for OpenCode 2 with a scheduler and GitHub dispatcher",
   "main": "./dist/index.js",
   "files": [
     "dist",
     "README.md",
     "docs",
-    "prompts"
+    "prompts",
+    "scripts/postinstall.mjs"
   ],
   "bin": {
     "opencode2-automation": "./dist/setup.js"
@@ -24,6 +25,7 @@
     "./rpc": "./dist/rpc.js"
   },
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",

@@ -125,3 +125,41 @@ checkout, not the worker branch. Absolute paths are also accepted. The file is
 reread on every use; missing or empty configured files stop execution with an
 error. The plugin never overwrites your file. Version it with the project, or
 ignore it locally for machine-specific instructions.
+
+## Follow progress and continue work
+
+Starting a session shows a notification and opens a background tab when tabs
+are enabled. Use `/bot` to list tasks and open a session.
+
+Closing or merging the PR automatically closes its known bot session tabs,
+including earlier rounds and media helpers. This also works for manual GitHub
+actions with `autoMerge` disabled. Closure is detected on the next repository
+scan; connected TUIs also refresh every 10 seconds. Busy tabs wait until their
+work finishes. Session history is preserved, and `/bot` can reopen a session.
+Reopening it manually keeps it open for the current TUI instance. No additional
+configuration is required.
+
+A new comment from an authorized author on a tracked issue starts another round:
+acknowledgement, implementation, and a push to the same open PR. The mention does
+not need to be repeated. Comments received during execution wait for the next
+round. A mention in an authorized comment can also start work on an untracked issue.
+
+Edits to existing comments and PR review comments are not supported. Closing the
+issue or closing/merging the PR blocks further rounds.
+
+Management commands run from the target repository:
+
+For source installations, replace `"$HOME/.local/bin/opencode2-automation"` with
+`node "$HOME/opencode2-github-automation/dist/setup.js"`.
+
+```bash
+cd /absolute/path/to/your-project
+"$HOME/.local/bin/opencode2-automation" status
+"$HOME/.local/bin/opencode2-automation" scan
+"$HOME/.local/bin/opencode2-automation" pause
+"$HOME/.local/bin/opencode2-automation" resume
+```
+
+Pausing stops scheduled scans; it does not cancel accepted tasks or active sessions.
+Do not run independent bots on two machines against the same issues: they do not
+share queue ownership across machines.

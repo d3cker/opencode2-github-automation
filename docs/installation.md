@@ -1,8 +1,36 @@
 # Installation on another machine
 
-Use the numbered [README installation, configuration, and update steps](../README.md).
-They cover global installation before choosing a target repository, configuring
-projects later, updating, removal, and keeping local configuration out of Git.
+Start with the [README](../README.md) for `.tgz` or source installation, updates,
+project configuration, headless startup, and removal. This page covers details
+and troubleshooting.
+
+## Package registration
+
+`npm install --global` runs the bundled `postinstall` script. It writes two small
+loaders under the OpenCode config directory, pointing to the installed package's
+server and TUI entrypoints. OpenCode discovers these without changes to
+`opencode.json`. Config path precedence is `OPENCODE_CONFIG_DIR`, then
+`$XDG_CONFIG_HOME/opencode`, then `$HOME/.config/opencode`.
+
+Registration creates no project settings, asks no questions, and does not restart
+OpenCode. Normal `npm ci` in a source checkout and project-local npm installs skip
+global registration. Source installs register explicitly with `setup.js install`.
+
+Updates reuse an existing recognized loader directory, including older names,
+and repoint both loaders when changing between source and `.tgz` installations.
+Customized files and duplicate registrations cause a clear error instead of being
+overwritten. Back up and resolve the reported loaders, then rerun installation.
+The installer does not modify other plugins or project configurations.
+
+If npm was configured to skip lifecycle scripts, register manually after install:
+
+```bash
+"$HOME/.local/bin/opencode2-automation" install
+```
+
+Use the same command to repair registration after moving the installed package.
+Keep the same npm prefix for updates. `npm uninstall` does not run an uninstall
+hook; remove the OpenCode loaders first as described in the README.
 
 ## Prerequisites
 
@@ -30,7 +58,8 @@ cd "$HOME/opencode2-github-automation"
 npm ci && npm run build
 ```
 
-Continue with global registration in the README. The plugin source and the
+Run `node "$HOME/opencode2-github-automation/dist/setup.js" install`, then follow
+the README's restart and project configuration steps. The plugin source and the
 repository the bot works on are separate directories. A global installation
 remains inactive in projects without `.opencode/automation.json`.
 

@@ -9,9 +9,16 @@ import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 import { configure } from "./wizard.js";
 import { installLocalEntrypoints } from "./local.js";
+import { installGlobalEntrypoints } from "./install.js";
+import { fileURLToPath } from "node:url";
 
 async function main() {
   const operation = process.argv[2];
+  if (operation === "install") {
+    const directory = await installGlobalEntrypoints(fileURLToPath(new URL("..", import.meta.url)));
+    console.log(`Registered OpenCode 2 automation and TUI in ${directory}. Restart the service when its sessions are idle. Run init inside a project when ready.`);
+    return;
+  }
   if (operation === "upgrade") {
     const { root, primary } = await checkout(process.cwd());
     if (!primary) throw new Error("Run upgrade in the primary checkout.");
@@ -35,7 +42,7 @@ async function main() {
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\nRun inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\ninstall registers the global plugin. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());
@@ -95,6 +102,6 @@ async function main() {
       await installLocalEntrypoints(root);
     }
   } catch (error) { await rm(file); throw error; }
-  console.log(`Ready: ${resolved.repo}. Trigger: ${EasyOptions.parse(settings).trigger}. Account: ${resolved.login}. Tests: ${resolved.check === false ? "skipped — the PR will report this" : resolved.check.join(" ")}.\nReopen the project in OpenCode 2. Automation also considers existing matching issues.`);
+  console.log(`Ready: ${resolved.repo}. Trigger: ${EasyOptions.parse(settings).trigger}. Account: ${resolved.login}. Tests: ${resolved.check === false ? "skipped — the PR will report this" : resolved.check.join(" ")}.\nLoad the project in OpenCode 2 through the TUI or the API. Automation also considers existing matching issues.`);
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : "Configuration failed"); process.exitCode = 1; });
