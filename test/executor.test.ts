@@ -150,7 +150,7 @@ test("PR title assessment uses the completed session and accepts features withou
 
 test("issue answers resume the same session once and retry uncertain delivery with the same ID", async () => {
   const t = { ...task(), sessionID: "ses_main", promptAttempted: true };
-  const prompts: any[] = []; let fail = true, interrupted = false;
+  const prompts: any[] = []; let fail = true, interrupted: boolean;
   const ctx = { session: {
     get: async () => ({ location: { directory: "/worktree" }, outcome: "succeeded" }),
     prompt: async (input: any) => { prompts.push(input); if (fail) { fail = false; throw new Error("connection lost after acceptance"); } },

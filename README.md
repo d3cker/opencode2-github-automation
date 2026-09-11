@@ -21,10 +21,11 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 
 ## Install from a .tgz package
 
-1. Download/copy the archive to the machine running OpenCode 2 and install it:
+1. Download/copy the archive to the machine running OpenCode 2 and install it
+   (replace `VERSION` with the downloaded version):
 
    ```bash
-   npm install --global --prefix "$HOME/.local" "$HOME/Downloads/opencode2-automation-0.5.0-beta.5.tgz"
+   npm install --global --prefix "$HOME/.local" "$HOME/Downloads/opencode2-automation-VERSION.tgz"
    ```
 
    `postinstall` registers both the plugin and TUI automatically. No `sudo`,
@@ -274,7 +275,30 @@ npm run check
 npm pack
 ```
 
-`npm run check` runs type checking, tests, and a build. `npm pack` creates
-`opencode2-automation-0.5.0-beta.5.tgz` with compiled code and the installer;
+Use Node 22.13+ or 24+ for development. `npm run check` runs ESLint, type checking,
+tests, and a build. `npm run package:check` additionally packs and verifies a
+global install in a temporary directory, including `postinstall` and the CLI.
+`npm pack` creates
+`opencode2-automation-<version>.tgz` using the version in `package.json`, with compiled code and the installer;
 copy it to another machine and follow the `.tgz` instructions above.
 `private: true` prevents accidental npm publication.
+
+## GitHub Actions and releases
+
+- **Pull requests:** CI runs ESLint, type checking, unit tests, a build, and a
+  package installation check on Node 22 and 24. Pushes to `main`/`master` also run CI.
+- **Releases:** push a SemVer tag to build and publish a GitHub Release with the
+  `.tgz` and SHA-256 checksum. The tag controls the package version; there is no
+  need to edit `package.json` first. Tests and package installation must pass.
+
+After the workflow files are committed and pushed, tag the commit you want to release:
+
+```bash
+git tag v0.5.0
+git push origin v0.5.0
+```
+
+Use your next unused version. Both `v0.5.0` and `0.5.0` are accepted; a suffix
+such as `v0.6.0-beta.1` creates a prerelease. Version changes happen only in CI,
+without a version commit or npm publication. Releases use the built-in
+`GITHUB_TOKEN`; no npm token or extra secret is needed.
