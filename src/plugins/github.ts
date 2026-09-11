@@ -1,3 +1,4 @@
+import { registerRuntimeBridge } from "../bridge.js";
 import { Plugin } from "@opencode/plugin";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,9 +22,18 @@ export default Plugin.define({
     const executor = new OpenCodeExecutor(ctx, options, controller.signal);
     let publish: (activity: Activity) => Promise<void> = async () => {};
     const dispatcher = new Dispatcher(options, new JsonStore(join(options.stateDirectory, "queue.json"), Queue, () => ({ version: 1, tasks: [] })), new Github(token, controller.signal, fetch, options.signature), executor, controller.signal, [token], Date.now, activity => publish(activity));
+    let releaseBridge: (() => void) | undefined;
     try {
       await dispatcher.init();
+      releaseBridge = registerRuntimeBridge(options.ownerDirectory, {
+        runtime: async ({ sessionID }) => dispatcher.runtime(sessionID),
+        question: async ({ sessionID, id, text, permission }) => dispatcher.question(sessionID, id, text, permission),
+        helper: async ({ sessionID, callID, capability }) => dispatcher.helper(sessionID, callID, capability),
+      });
       const registration = await ctx.rpc.register(GithubRpc, {
+        runtime: async ({ sessionID }) => JSON.parse(JSON.stringify(dispatcher.runtime(sessionID))),
+        question: async ({ sessionID, id, text, permission }) => dispatcher.question(sessionID, id, text, permission),
+        helper: async ({ sessionID, callID, capability }) => dispatcher.helper(sessionID, callID, capability),
         diagnose: async ({ sessionID }) => {
           try { await ctx.session.get({ sessionID }); return { exists: true }; }
           catch (error) { return { exists: false, error: redact(error, [token]) }; }
@@ -37,7 +47,7 @@ export default Plugin.define({
       const tick = () => { if (!controller.signal.aborted) void dispatcher.tick().catch(error => { console.error("Dispatcher stopped", redact(error, [token])); controller.abort(error); }); };
       const timer = setInterval(tick, options.workerEverySeconds * 1000);
       tick();
-      return async () => { clearInterval(timer); controller.abort(); await registration.dispose(); await dispatcher.settle(); await release(); };
-    } catch (error) { controller.abort(); await release(); throw error; }
+      return async () => { clearInterval(timer); controller.abort(); await registration.dispose(); await dispatcher.settle(); releaseBridge?.(); await release(); };
+    } catch (error) { controller.abort(); releaseBridge?.(); await release(); throw error; }
   },
 });

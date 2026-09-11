@@ -2,31 +2,49 @@
 
 A scheduler and GitHub dispatcher in one package, built for **OpenCode 2**.
 
-`@opencodebot` in an issue → acknowledgement and plan → implementation → verification → pull request.
+`@opencodebot` in an issue → acknowledgement → questions if needed → implementation → tests → PR.
 
-The model chooses each new PR title from the issue and completed-work summary.
-There is no fixed `Fix` prefix. The chosen title is saved before publication and
-reused if publication needs a retry.
+The bot waits for answers in the issue, handles follow-up comments, chooses PR
+titles, and can merge after an authorized approval. The TUI is optional.
 
 ## Requirements
 
-- OpenCode 2 with a working model. Tested with `0.0.0-beta-19398`.
-- Node.js 22+, npm, and Git.
-- GitHub authentication through `gh auth login`, or `GITHUB_TOKEN`/`GH_TOKEN`
-  in the server environment.
-- Permission to comment, push branches, and create PRs in the target repository.
-- A target repository with a GitHub `origin`, an existing default-branch commit,
-  and issues enabled.
+- OpenCode **2** with a working model; tested with `0.0.0-beta-19398`.
+- Node.js 22+, npm, and Git on macOS/Linux.
+- GitHub authentication (`gh auth login` and `gh auth setup-git`, or a token in
+  the service environment) and permission to comment, push, and create PRs.
+- When configuring a project: a primary Git checkout with a GitHub `origin`,
+  a pushed commit, and issues enabled.
 
-The package is installed from source; publishing to npm is unnecessary.
-`private: true` prevents accidental publication while still allowing `npm pack`.
+Choose **one** installation method below. No target repository is needed yet.
+Nothing needs to be published to npm. `$HOME` expands to your home directory.
 
-## 1. Install the plugin globally
+## Install from a .tgz package
 
-Run these steps on the machine that will run OpenCode 2. You do not need a target
-project yet. `$HOME` expands to your user's absolute home directory.
+1. Download/copy the archive to the machine running OpenCode 2 and install it
+   (replace `VERSION` with the downloaded version):
 
-1. Clone and build the plugin:
+   ```bash
+   npm install --global --prefix "$HOME/.local" "$HOME/Downloads/opencode2-automation-VERSION.tgz"
+   ```
+
+   `postinstall` registers both the plugin and TUI automatically. No `sudo`,
+   source checkout, or manual config editing is needed. Do not add
+   `--ignore-scripts`; npm needs network access to install dependencies.
+
+2. Restart the service when its sessions are idle:
+
+   ```bash
+   opencode2 service restart
+   ```
+
+The CLI is now at `$HOME/.local/bin/opencode2-automation`. If `$HOME/.local/bin`
+is on your PATH, you can use the shorter `opencode2-automation` command.
+Configure a project below when ready.
+
+## Install from source
+
+1. Clone and build:
 
    ```bash
    git clone https://github.com/d3cker/opencode2-github-automation.git "$HOME/opencode2-github-automation"
@@ -34,143 +52,144 @@ project yet. `$HOME` expands to your user's absolute home directory.
    npm ci && npm run build
    ```
 
-2. Register the plugin and its terminal UI:
+2. Register the plugin and TUI:
 
    ```bash
-   mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation"
-   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/index.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/index.js"
-   printf 'export { default } from "%s";\n' "$HOME/opencode2-github-automation/dist/tui.js" > "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/tui.js"
+   node "$HOME/opencode2-github-automation/dist/setup.js" install
    ```
 
-   Run this registration once; do not overwrite customized loaders.
-
-3. Restart the service when sessions are idle, then reopen your OpenCode client:
+3. Restart the idle service:
 
    ```bash
    opencode2 service restart
    ```
 
-Installed. No project is automated yet. Keep the plugin source directory:
-OpenCode loads the compiled code from its `dist` folder.
+Keep the source directory: OpenCode loads its compiled code. `npm ci` in a
+source checkout does not register a global plugin automatically.
+Both installers reuse recognized older loaders and refuse to overwrite custom
+code. Registration defaults to `~/.config/opencode/plugins/opencode-automation/`
+and respects `XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR`.
 
-## 2. Configure a project
+## Configure a project
 
-Use an existing Git checkout with a GitHub `origin`. Replace
-`/absolute/path/to/your-project` with its actual absolute path.
-Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
-
-1. Enter the target repository and start the wizard:
+1. Enter your target repository and run the wizard:
 
    ```bash
    cd /absolute/path/to/your-project
-   node "$HOME/opencode2-github-automation/dist/setup.js" init
+   "$HOME/.local/bin/opencode2-automation" init
    ```
 
-   Each prompt shows a default in brackets. Press Enter to accept it or type
-   another value. The wizard asks for model, trigger, signature, allowed authors,
-   polling interval, automatic merging, merge method, and test command.
-   Do not add `--local`.
+   **Source installation:** use
+   `node "$HOME/opencode2-github-automation/dist/setup.js" init` instead.
 
-   Defaults: the detected OpenCode model, `@opencodebot`, your GitHub login with
-   `[OpenCode2]`, your GitHub login as the allowed author, 60 seconds, automatic
-   merging enabled, squash, and detected tests (or `skip` if none are found).
-   If no model can be detected from the running service, enter `provider/model`.
-   Enter accepts detected tests; type `skip` to disable them. Complex test commands
-   can be entered as JSON argument arrays, e.g. `["npm", "run", "test:unit"]`.
+2. Answer the prompts. Enter accepts the value in brackets. The wizard asks
+   about the model and capabilities, a vision helper if needed, base branch,
+   trigger, signature, allowed authors, polling, auto-merge, and tests.
+   Use `provider/model` for model IDs and `skip` to skip automated tests.
 
-2. Review `/absolute/path/to/your-project/.opencode/automation.json`.
-   To allow a colleague to request work, add their GitHub login to `authors`:
+3. Load the project with the [headless command below](#run-without-the-tui), or
+   open it with `opencode2 /absolute/path/to/your-project`.
 
-   ```json
-   {
-     "model": "local/deepseek",
-     "signature": "YOUR_LOGIN[OpenCode2]",
-     "authors": ["YOUR_LOGIN", "COLLEAGUE_LOGIN"],
-     "autoMerge": {
-       "enabled": true,
-       "method": "squash"
-     },
-     "check": false
-   }
+Settings are saved to `/absolute/path/to/your-project/.opencode/automation.json`.
+If it already exists, edit it directly and skip `init`. Repeat setup for each
+repository; the plugin is installed only once. After editing settings, restart
+the idle service and reload the project.
+
+Create an issue containing `@opencodebot` (or your configured trigger). The bot
+checks every 60 seconds by default and may also pick up existing matching issues.
+Only the authenticated GitHub user is allowed by default; add colleagues to
+`authors` in the JSON to let them request work.
+
+## Run without the TUI
+
+Run once for **each configured primary checkout**, with its absolute path:
+
+```bash
+opencode2 api v2.plugin.awaitActivation --param 'location[directory]=/absolute/path/to/your-project'
+```
+
+This starts the shared service if needed and loads the project's plugins. The
+command exits; the bot keeps running without a TUI or extra monitoring process.
+**Repeat it after every service restart.**
+
+For automatic startup after a machine reboot, put one invocation per project in
+your operating system's startup mechanism, under the same user, after networking
+is available. Use absolute executable/repository paths (`command -v opencode2`
+finds the executable) and provide the usual PATH and GitHub authentication.
+A reboot-only task does not handle later `opencode2 service restart` calls.
+
+## Update from a .tgz package
+
+Wait for active bot work to finish. Download the new archive, then:
+
+1. Install the new file using the **same prefix** as before:
+
+   ```bash
+   npm install --global --prefix "$HOME/.local" /absolute/path/to/opencode2-automation-NEW_VERSION.tgz
    ```
 
-   Use your actual model and usernames. Without `authors`, only the authenticated
-   GitHub user can request work. Auto-merge also requires the approving user to
-   have repository write access.
+   Replace the example path with your archive. `postinstall` refreshes registration;
+   project settings and queues are preserved. Do not run `init` again.
 
-3. Restart the idle service and open the target project:
+2. Reload the service:
 
    ```bash
    opencode2 service restart
-   opencode2 /absolute/path/to/your-project
    ```
 
-Create an issue containing `@opencodebot`. The bot checks once a minute; `/bot`
-shows progress. Existing matching issues may also be picked up.
+3. Run the [headless command](#run-without-the-tui) for each project, or open each
+   in the TUI. Reopen existing TUI clients when the update changes the UI.
 
-**Code is global; configuration is per project.** Only repositories containing
-`.opencode/automation.json` are activated. Run the wizard in another checkout to
-add another project. Existing configuration files are never overwritten by `init`.
+Switching from a source installation to `.tgz` uses the same procedure; recognized
+source loaders are repointed to the installed package instead of duplicated.
 
-## 3. Update an existing installation
+## Update from source
 
-Run this on the machine with the global installation. Wait for active bot work
-to finish first.
+Wait for active bot work to finish, then:
 
-1. Download updates for the branch you currently use:
+1. Download changes for your current branch:
 
    ```bash
    cd "$HOME/opencode2-github-automation"
    git pull --ff-only
    ```
 
-2. Install dependencies and rebuild:
+2. Rebuild:
 
    ```bash
    npm ci && npm run build
    ```
 
-3. Reload the service:
+3. Restart and [reload each project](#run-without-the-tui):
 
    ```bash
    opencode2 service restart
    ```
 
-Reopen the terminal client if the update changes the UI. Project configuration
-and queues remain in place. Do not repeat global registration or run `init` again.
-
-### Changes in this version
-
-The default trigger is now `@opencodebot`. Existing explicit `trigger`, `signature`,
-and `authors` settings are preserved. If an older configuration omitted `trigger`,
-set it explicitly before upgrading to retain the old mention (for example,
-`"trigger": "@your-existing-bot"`). The built-in merge phrases are now English;
-custom phrases can still be configured in any language.
-
-Existing global loader directories may be named `d3ckerbot`. Keep those loaders
-when updating; do not register a second copy under `opencode-automation`. When
-uninstalling, use the name of the directory you originally created.
+Settings and queues remain in place. Do not run `init` again. If switching back
+from `.tgz` to source, also run the source `install` command after rebuilding.
 
 ### Switch to the feature branch for testing
 
-Replace update step 1 with:
+For a fresh source installation, add `--branch codex/issue-dialogue-capabilities`
+to the clone command. For an existing source checkout, replace update step 1 with:
 
 ```bash
 cd "$HOME/opencode2-github-automation"
 git fetch origin
-git switch codex/english-setup-defaults
+git switch codex/issue-dialogue-capabilities
 git pull --ff-only
 ```
 
-Then complete update steps 2 and 3. The approval and signature features described
-below are available on this branch (`0.4.0-beta.2`).
+Then complete source installation or update as appropriate. A `.tgz` contains
+the code from the branch used to build it; there is no Git branch to switch on
+the receiving machine.
 
-## 4. Remove automation from one project
+## Remove automation from one project
 
-This disables the project configured through `init`; the global plugin remains
-available for other projects. Wait for bot sessions to finish first.
+Wait for its bot sessions to finish, then:
 
-1. Remove that project's configuration (confirm the deletion when prompted):
+1. Remove that project's settings:
 
    ```bash
    rm -i /absolute/path/to/your-project/.opencode/automation.json
@@ -182,202 +201,106 @@ available for other projects. Wait for bot sessions to finish first.
    opencode2 service restart
    ```
 
-3. Reopen the client. The bot no longer scans, starts work, or merges PRs for
-   this project. Other configured projects continue working.
+3. Reload the other projects you still want automated.
 
-Removing the file alone does not stop an already-loaded worker; the restart
-applies the change. Queue data, worktrees, branches, and GitHub issues/PRs are
-preserved. Running `init` again re-enables the project and may resume its saved
-queue. If configuration was instead supplied through plugin options in
-`opencode.json`, remove those options or disable that plugin entry as well.
+Removing the file alone does not stop an already-loaded worker. Queues, worktrees,
+branches, and GitHub issues/PRs are preserved. Running `init` again can resume
+saved work. If you configured the plugin through `opencode.json` options instead,
+remove those options or disable its entry too.
 
-## 5. Uninstall the global plugin
+## Uninstall the global plugin
 
-For the global installation described above, wait for active work to finish.
+Wait for active work to finish. Use the loader directory reported during install;
+older installations may use a different name. With the default directory:
 
-1. Remove only this plugin's two global loaders:
-
-   ```bash
-   rm -i "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/index.js" "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/opencode-automation/tui.js"
-   ```
-
-2. Restart the service:
+1. Remove the two loaders:
 
    ```bash
-   opencode2 service restart
+   rm -i "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/plugins/opencode-automation/index.js" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/plugins/opencode-automation/tui.js"
    ```
 
-3. Close and reopen OpenCode clients to unload the terminal UI.
+2. For a `.tgz` installation, remove the package:
 
-The source checkout, project settings, and saved work remain on disk. Separate
-project-local installations are unaffected; their loaders live under each
-project's `.opencode/plugins/automation/` directory.
+   ```bash
+   npm uninstall --global --prefix "$HOME/.local" opencode2-automation
+   ```
 
-## Configuration files and Git branches
+3. Run `opencode2 service restart` and reopen any TUI clients.
 
-- `.opencode/automation.json` is a **file in the target checkout**, not in the
-  plugin's source repository. Creating it does not automatically upload it.
-- With the global installation, `init` does **not** add a Git ignore rule.
-  An ordinary `git add .` can therefore stage it unless your repository already
-  ignores it. The alternative `install-local.sh` installer does add local
-  exclusions automatically.
-- Keep machine-specific configuration untracked. From the target checkout,
-  add a local ignore rule that is not itself committed:
+Project settings and saved work remain on disk. Source and project-local
+installations are not removed by `npm uninstall --global`.
 
-  ```bash
-  cd /absolute/path/to/your-project
-  printf '\n/.opencode/automation.json\n' >> "$(git rev-parse --git-path info/exclude)"
-  ```
+## Configuration and everyday use
 
-- Check whether Git already tracks it:
+- **Questions:** answer in the issue using an account in `authors`. The bot waits
+  for your answer; the bot and human can share a GitHub account.
+- **Branches:** write naturally, e.g. "use branch develop". `baseBranch` sets the
+  default for new work; existing tasks keep their chosen base.
+- **Media:** the wizard can configure a separate vision model. Set actual model
+  capabilities (`text`, `vision`, `audio`); helpers run in separate sessions.
+- **Instructions:** [prompts/bot.md](prompts/bot.md) is always loaded. Append your
+  own Markdown with `"systemPromptFile": ".opencode/bot.md"`.
+- **Merging:** approve the bot's PR or post a configured merge phrase. The author
+  must be allowed and have repository write access. Set `autoMerge.enabled` to
+  `false` to disable this. `signature` controls the signature on new bot messages.
+- **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
+  `resume` commands from the target repository. Closing a PR closes its bot tabs
+  while retaining session history. Authorized issue comments can continue work
+  on an open PR without another mention.
 
-  ```bash
-  git ls-files -- .opencode/automation.json
-  ```
+Keep machine-specific `.opencode/automation.json` files out of Git: global `init`
+does not add an ignore rule. See [configuration and Git branches](docs/configuration.md#configuration-files-and-git-branches)
+for ignore instructions, branch-switch behavior, and all JSON options.
 
-  No output means it is untracked. If the path appears, ignoring it is not
-  enough: use `git rm --cached -- .opencode/automation.json` and commit that
-  removal to stop versioning it on the current branch. The local file stays.
-- An untracked, ignored file normally stays in place during branch switches.
-  If another branch tracks that same path, Git can replace it; keep a backup
-  before switching to such branches. A tracked file follows branch contents
-  and can change or disappear when you switch. OpenCode does not restore it.
-  `git clean -fdx` also deletes ignored files.
-- A separate clone or worktree does not automatically inherit an untracked
-  configuration. The scheduler only activates in the primary checkout.
-  Bot-created worktrees are used for implementation, without starting another
-  scheduler. Queue data lives under the shared Git directory in
-  `opencode2-automation/` and is not uploaded by Git push.
-
-## Configuration
-
-A minimal configuration is:
-
-```json
-{
-  "model": "provider/model"
-}
-```
-
-Use a model available in your own OpenCode 2 installation. Optional fields:
-
-| Field | Purpose |
-| --- | --- |
-| `trigger` | Mention that starts work; defaults to `@opencodebot`. |
-| `everySeconds` | Polling interval; defaults to 60 seconds. |
-| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
-| `authors` | GitHub usernames allowed to request work and authorize merging (merge also requires repository write access). |
-| `signature` | Signature appended to every posted comment and PR description; defaults to `your-github-login[OpenCode2]`. |
-| `autoMerge` | Automatic merge settings: `enabled` (default `true`), `method` (default `squash`), and exact approval `comments`. |
-
-When tests are skipped, the PR explicitly reports that automated tests were not
-run. Git consistency checks and the requirement for an actual change remain.
-Restart the service while idle after changing configuration.
-
-For noninteractive setup, use `--yes` to accept defaults for omitted options.
-Provide the model and a test command (or explicitly skip tests):
-
-```bash
-cd /absolute/path/to/your-project
-node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests --yes
-```
-
-## Automatic merge and message signatures
-
-Example project configuration:
-
-```json
-{
-  "model": "provider/model",
-  "check": false,
-  "signature": "YOUR_LOGIN[OpenCode2]",
-  "autoMerge": {
-    "enabled": true,
-    "method": "squash",
-    "comments": ["/merge", "lgtm, merge", "approved, merge"]
-  }
-}
-```
-
-For a PR created by this bot, either approve the current published commit using
-GitHub's **Approve** review, or post one of the configured full-message phrases
-in the PR conversation. Matching ignores case, repeated whitespace, and final
-periods/exclamation marks. Arbitrary positive prose, quoted commands, negations,
-and inline code review comments are not interpreted as merge instructions.
-
-The approving account must be in `authors` (by default, the authenticated user)
-and have write, maintain, or admin permission on the repository. GitHub does not
-allow authors to approve their own PRs; use a configured comment in that case.
-Outstanding change requests block merge. The PR must be open, non-draft, and
-reported as clean and mergeable by GitHub. The merge request includes the exact
-verified head SHA; a changed branch cannot be merged using an older approval.
-The bot does not request a protection bypass. Configure required checks and review
-rules on GitHub for your repository's policy.
-
-Approvals must be newer than the bot's latest publication. On upgrade, old tasks
-start watching for new approvals; historical approvals do not cause a merge.
-Pending issue feedback is processed before attempting a merge. Merge failures
-are retried at intervals of at least 60 seconds and appear as `mergeError` in
-`status` and in `/bot`. Successful merges receive a signed PR comment.
-
-Signatures are appended to issue comments, PR descriptions, and merge
-acknowledgements. They identify the message in its text; GitHub still attributes
-posts to the account authenticated by your token. Existing posts are not rewritten.
-Set `"autoMerge": { "enabled": false }` to disable automatic merging.
-
-## Follow progress and continue work
-
-Starting a session shows a notification and opens a background tab when tabs
-are enabled. Use `/bot` to list tasks and open a session.
-
-A new comment from an authorized author on a tracked issue starts another round:
-acknowledgement, implementation, and a push to the same open PR. The mention does
-not need to be repeated. Comments received during execution wait for the next
-round. A mention in an authorized comment can also start work on an untracked issue.
-
-Edits to existing comments and PR review comments are not supported. Closing the
-issue or closing/merging the PR blocks further rounds.
-
-Management commands run from the target repository:
-
-```bash
-cd /absolute/path/to/your-project
-node "$HOME/opencode2-github-automation/dist/setup.js" status
-node "$HOME/opencode2-github-automation/dist/setup.js" scan
-node "$HOME/opencode2-github-automation/dist/setup.js" pause
-node "$HOME/opencode2-github-automation/dist/setup.js" resume
-```
-
-Pausing stops scheduled scans; it does not cancel accepted tasks or active sessions.
-Do not run independent bots on two machines against the same issues: they do not
-share queue ownership across machines.
+More details: [runtime behavior](docs/runtime.md), [installation troubleshooting
+and project-local installs](docs/installation.md), and [advanced settings](docs/advanced.md).
 
 ## Alternative: install only in one project
 
-If you have not installed the plugin globally, the local installer builds,
-packs, and installs it inside a target checkout:
+For a project without a global installation, use the existing source installer:
 
 ```bash
 bash "$HOME/opencode2-github-automation/scripts/install-local.sh" /absolute/path/to/your-project
 ```
 
-It prompts for configuration on first installation and preserves existing settings
-on upgrades. It does not restart OpenCode. Use either global or project-local
-installation; do not enable both for the same project.
+It configures the project on first install and preserves settings on updates.
+Do not combine it with a global installation for the same project.
 
-## Development
+## Development and building a .tgz
 
 ```bash
+cd "$HOME/opencode2-github-automation"
 npm ci
 npm run check
 npm pack
 ```
 
-`npm run check` runs type checking, tests, and a build. `npm pack` produces a local
-installation archive. Build artifacts, dependencies, and local credentials are
-excluded from the source repository.
+Use Node 22.13+ or 24+ for development. `npm run check` runs ESLint, type checking,
+tests, and a build. `npm run package:check` additionally packs and verifies a
+global install in a temporary directory, including `postinstall` and the CLI.
+`npm pack` creates
+`opencode2-automation-<version>.tgz` using the version in `package.json`, with compiled code and the installer;
+copy it to another machine and follow the `.tgz` instructions above.
+`private: true` prevents accidental npm publication.
 
-Additional documentation:
+## GitHub Actions and releases
 
-- [Moving the source and installing on another machine](docs/installation.md)
-- [Advanced configuration, retries, permissions, and separate plugins](docs/advanced.md)
+- **Pull requests:** CI runs ESLint, type checking, unit tests, a build, and a
+  package installation check on Node 22 and 24. Pushes to `main`/`master` also run CI.
+- **Releases:** push a SemVer tag to build and publish a GitHub Release with the
+  `.tgz` and SHA-256 checksum. CI verifies that the tag matches the committed
+  version in `package.json` and `package-lock.json`. Tests and package installation must pass.
+
+For a stable release, merge the PR first, then update your local `main` branch.
+With a clean working tree, run (replace `0.6.0` with your next unused version):
+
+```bash
+npm version 0.6.0
+git push --atomic origin HEAD v0.6.0
+```
+
+`npm version` updates both manifests, creates a commit, and tags it automatically.
+The push sends the current branch and tag together. For testing, use a version
+such as `0.7.0-beta.1` on a feature branch; CI marks it as a prerelease.
+CI does not rewrite versions or publish to npm. Releases use the built-in
+`GITHUB_TOKEN`; no npm token or extra secret is needed.

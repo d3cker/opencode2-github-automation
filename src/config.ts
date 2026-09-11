@@ -3,7 +3,12 @@ import { isAbsolute } from "node:path";
 
 const absolute = z.string().refine(isAbsolute, "Use an absolute path");
 const name = z.string().regex(/^[A-Za-z0-9_.-]+$/);
+export const BranchName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9/_.-]*$/).refine(s => !s.includes("..") && s.split("/").every(part => part && !part.startsWith(".") && !part.endsWith(".") && !part.endsWith(".lock")), "Use a valid Git branch name");
+export const Capabilities = z.array(z.enum(["text", "vision", "audio"])).min(1).refine(c => c.includes("text"), "Models must support text output");
+export const MediaModel = z.object({ model: z.object({ providerID: z.string().min(1), id: z.string().min(1) }), capabilities: Capabilities });
 export const Route = z.object({
+  capabilities: Capabilities.optional(),
+  mediaModel: MediaModel.optional(),
   agent: z.string().min(1).default("build"),
   model: z.object({ providerID: z.string().min(1), id: z.string().min(1) }).strict(),
 }).strict();
@@ -11,7 +16,7 @@ export type Route = z.infer<typeof Route>;
 export const Repository = z.object({
   repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   directory: absolute,
-  baseBranch: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9/_.-]*$/).refine(s => !s.includes("..") && !s.endsWith(".lock")),
+  baseBranch: BranchName,
   allowedAuthors: z.array(name).min(1),
   checks: z.array(z.array(z.string().min(1)).min(1)),
 }).strict();
@@ -22,6 +27,7 @@ export const MergeOptions = z.object({
   comments: z.array(z.string().trim().min(1)).min(1).default(["/merge", "lgtm, merge", "approved, merge"]),
 }).strict();
 export const GithubOptions = z.object({
+  systemPromptFile: z.string().min(1).optional(),
   signature: z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/).optional(),
   autoMerge: MergeOptions.default({ enabled: true, method: "squash", comments: ["/merge", "lgtm, merge", "approved, merge"] }),
   ownerDirectory: absolute,

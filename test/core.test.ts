@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { GithubOptions, Job, matchRoute } from "../src/config.js";
 import { Scheduler } from "../src/scheduler.js";
-import { Dispatcher, Blocked, type Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
+import { Dispatcher, Blocked, Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
 import { JsonStore, acquire, type Store } from "../src/state.js";
-import { Github, GithubError, type Issue } from "../src/github.js";
+import { Github, GithubError, type Issue, type Comment } from "../src/github.js";
 
 const route = { agent: "build", model: { providerID: "deepseek", id: "test-model" } };
 const options = GithubOptions.parse({ ownerDirectory: "/repo", stateDirectory: "/state", repositories: [{ repo: "owner/repo", directory: "/repo", baseBranch: "main", allowedAuthors: ["alice"], checks: [["npm", "test"]] }], routes: { "@deepseek": route } });
@@ -27,11 +27,14 @@ function fixture() {
     issues: async () => [structuredClone(issue)], issue: async () => structuredClone(issue),
     ensureComment: async () => { events.push("comment"); return 42; },
     findPull: async () => undefined,
+    pull: async (_repo, number) => ({ number, html_url: `https://github.com/owner/repo/pull/${number}`, state: "open" }),
     ensurePull: async () => { events.push("pr"); return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; },
   };
   const executor: Executor = {
+    selectBase: async (_task, repo) => ({ kind: "branch", branch: repo.baseBranch }),
+    hasBranch: async () => true,
     title: async () => "Repair counter increment",
-    analyze: async () => { events.push("analyze"); return "Problem and verification plan"; },
+    analyze: async () => { events.push("analyze"); return { kind: "proceed", comment: "Problem and verification plan" }; },
     prepare: async () => { events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; },
     run: async (_, checkpoint) => { events.push("run"); await checkpoint({ sessionID: "ses_test" }); },
     verify: async () => { events.push("verify"); return { checks: ["npm test passed"], commit: "sha" }; },
@@ -40,6 +43,192 @@ function fixture() {
   const make = () => new Dispatcher(options, store, github, executor, new AbortController().signal, [], () => time);
   return { events, store, github, executor, make, advance: () => { time += 4_000_000; } };
 }
+
+function proposalFixture(botLogin = "alice") {
+  const f = fixture();
+  const comments: Comment[] = [];
+  let nextID = 20;
+  const addComment = (body: string, login = "alice", type = "User") => {
+    const comment = { id: nextID++, body, user: { login, type } };
+    comments.push(comment); return comment;
+  };
+  const request = { ...issue, title: "Questions test", body: "I would like new sorting algorithms in scripts/. Give me some proposals before you start implementing. @deepseek" };
+  f.github.issues = async () => [request]; f.github.issue = async () => request;
+  f.github.comments = async () => structuredClone(comments);
+  f.github.ensureComment = async (_repo, _number, marker, body) => {
+    const prior = comments.find(c => c.body.startsWith(marker));
+    if (prior) return prior.id;
+    const isQuestion = marker.includes(":question:");
+    // The decision and pending question must be durable before POST starts.
+    if (isQuestion) assert.ok(f.store.data.tasks[0]?.question);
+    f.events.push(isQuestion ? "question" : "comment");
+    return addComment(`${marker}\n${body}\n\n${botLogin}[OpenCode2]`, botLogin).id;
+  };
+  f.executor.analyze = async task => {
+    f.events.push("analyze");
+    if (task.analysisDialogue?.at(-1)?.answer.body === "Implement heapsort only. Use branch develop.") {
+      return { kind: "proceed", comment: "I will implement heapsort only, then verify it. Code has not yet been inspected." };
+    }
+    return { kind: "question", comment: "Proposals: heapsort or a Timsort-style hybrid. Code has not yet been inspected.", question: "Which algorithm should I implement?" };
+  };
+  return { ...f, comments, addComment };
+}
+
+for (const botLogin of ["alice", "automation-service"]) {
+  test(`analysis questions wait across scans and restart with ${botLogin === "alice" ? "a shared" : "a separate"} posting account`, async () => {
+    const f = proposalFixture(botLogin);
+    // An older comment cannot answer a question that has not been posted yet.
+    f.addComment("An earlier request");
+    let d = f.make(); await d.init(); await d.scan(); await d.tick();
+    assert.deepEqual(f.events, ["analyze", "question"]);
+    const waiting = d.status()[0]!;
+    assert.equal(waiting.status, "waiting"); assert.equal(waiting.phase, "analyzing");
+    assert.equal(waiting.question?.purpose, "analysis");
+    assert.equal(waiting.sessionID, undefined); assert.equal(waiting.worktree, undefined);
+    // All robot posts carry markers, even when the robot uses the person's login.
+    f.addComment("<!-- opencode2:owner/repo#1:analysis:v1 --> Implement heapsort only. Use branch develop.", botLogin);
+    f.addComment("Implement heapsort only. Use branch develop.", "stranger");
+    f.addComment("Implement heapsort only. Use branch develop.", "alice", "Bot");
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    f.advance(); d = f.make(); await d.init();
+    for (let i = 0; i < 3; i++) { await d.scan(); await d.tick(); }
+    assert.equal(d.status()[0]?.status, "waiting");
+    assert.equal(d.status()[0]?.question?.answer, undefined);
+    assert.deepEqual(f.events, ["analyze", "question"]);
+    const answer = f.addComment("Implement heapsort only. Use branch develop.");
+    f.executor.selectBase = async (task, _repo, inputs) => {
+      assert.equal(task.analysisDialogue?.[0]?.answer.id, answer.id);
+      assert.ok(inputs.some(i => i.text === answer.body));
+      return { kind: "branch", branch: "develop" };
+    };
+    f.executor.run = async task => {
+      assert.deepEqual(task.analysisDialogue?.map(d => d.answer.id), [answer.id]);
+      assert.equal(task.question, undefined); f.events.push("run");
+    };
+    await d.scan(); await d.tick();
+    assert.equal(d.status()[0]?.status, "done"); assert.equal(d.status()[0]?.baseBranch, "develop");
+    assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+    assert.deepEqual(f.events, ["analyze", "question", "analyze", "comment", "prepare", "run", "verify", "push", "pr"]);
+    await d.scan(); await d.tick();
+    assert.equal(f.events.filter(e => e === "run").length, 1);
+  });
+}
+
+test("an unclear answer asks again instead of authorizing a default, and only a new reply can resolve it", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  const first = d.status()[0]!.question!;
+  f.addComment("Not sure yet");
+  await d.scan(); await d.tick();
+  const second = d.status()[0]!.question!;
+  assert.notEqual(second.id, first.id); assert.ok(second.commentID! > first.commentID!);
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+  d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.question?.answer, undefined);
+  assert.ok(!f.events.includes("prepare"));
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 2);
+});
+
+test("a lost analysis-question POST response recovers the same comment and a reply seen before reconciliation", async () => {
+  const f = proposalFixture(); let d = f.make();
+  const post = f.github.ensureComment; let lose = true;
+  f.github.ensureComment = async (...args) => {
+    const id = await post(...args);
+    if (lose) { lose = false; throw new Error("Connection lost after posting"); }
+    return id;
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.equal(d.status()[0]?.question?.commentID, undefined);
+  const id = d.status()[0]?.question?.id;
+  const reply = f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); // Seen before the question's comment ID was reconciled.
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.question?.id, id);
+  assert.deepEqual(f.events, ["analyze", "question"]);
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.[0]?.answer.id, reply.id);
+  assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+});
+
+test("a failed model reassessment preserves the accepted reply exactly once across restart", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  const analyze = f.executor.analyze;
+  f.executor.analyze = async () => { throw new Error("Model unavailable"); };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.equal(d.status()[0]?.analysisDecision, undefined);
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+  assert.ok(!f.events.includes("prepare"));
+  f.advance(); f.executor.analyze = analyze; d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+});
+
+test("a closed issue stays blocked after a clarification reply", async () => {
+  const f = proposalFixture(), d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan();
+  f.github.issue = async () => ({ ...issue, state: "closed" });
+  await d.tick();
+  assert.equal(d.status()[0]?.status, "blocked"); assert.ok(!f.events.includes("prepare"));
+});
+
+test("legacy published prose is reassessed before a worktree is created", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan();
+  Object.assign(f.store.data.tasks[0]!, { phase: "commented", analysis: "Heapsort or Timsort? Please choose before I start.", commentID: 10 });
+  d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.ok(!f.events.includes("prepare"));
+});
+
+test("invalid analysis decisions never post or start implementation", async () => {
+  const f = fixture();
+  f.executor.analyze = async () => ({ kind: "proceed", comment: "Plan", question: "Which one?" }) as any;
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.deepEqual(f.events, []);
+});
+
+test("a new round requires its own clarification and does not reuse a previous answer", async () => {
+  const f = proposalFixture(), d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.addComment("Propose one more algorithm before implementing it.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.round, 2); assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.analysisDialogue, undefined);
+  assert.equal(d.status()[0]?.question?.answer, undefined);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+  assert.equal(f.events.filter(e => e === "push").length, 1);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("another issue can proceed while an analysis question remains unanswered", async () => {
+  const f = proposalFixture(), d = f.make();
+  const request = await f.github.issue("owner/repo", 1);
+  f.github.issues = async () => [request, { ...issue, number: 2 }];
+  f.github.issue = async (_repo, number) => number === 1 ? request : { ...issue, number: 2 };
+  const analyze = f.executor.analyze;
+  f.executor.analyze = async task => task.issue.number === 1 ? analyze(task) : { kind: "proceed", comment: "Repair the counter and verify it." };
+  await d.init(); await d.scan(); await d.tick(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.sessionID, undefined);
+  assert.equal(d.status()[1]?.status, "done");
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
 
 test("routing matches full tags, ignores emails and rejects ambiguous routes", () => {
   assert.deepEqual(matchRoute("(@DEEPSEEK) fix", options.routes), route);
@@ -285,4 +474,192 @@ test("auto-merge can be disabled independently of issue processing", async () =>
   const f = fixture(); let called = false; f.github.mergeApproved = async () => { called = true; return true; };
   const d = new Dispatcher({ ...options, autoMerge: { ...options.autoMerge, enabled: false } }, f.store, f.github, f.executor, new AbortController().signal);
   await d.init(); await d.scan(); await d.tick(); await d.tick(); assert.equal(called, false); assert.equal(d.status()[0]?.status, "done");
+});
+
+for (const merged of [false, true]) {
+  test(`scanning detects a manually ${merged ? "merged" : "closed"} PR even with auto-merge disabled and its issue closed`, async () => {
+    const f = fixture(); const notifications: ReturnType<Dispatcher["activity"]>[number][] = [];
+    const config = { ...options, autoMerge: { ...options.autoMerge, enabled: false } };
+    const make = () => new Dispatcher(config, f.store, f.github, f.executor, new AbortController().signal, [], () => 1000, async a => { notifications.push(a); });
+    let d = make(); await d.init(); await d.scan(); await d.tick();
+    f.github.issues = async () => [];
+    f.github.issue = async () => ({ ...issue, state: "closed" });
+    f.github.pull = async (_repo, number) => ({ number, html_url: "https://github.com/owner/repo/pull/2", state: "closed", merged });
+    await d.scan();
+    assert.equal(d.status()[0]?.pr?.state, "closed");
+    assert.equal(d.activity()[0]?.phase, merged ? "merged" : "pr_closed");
+    assert.equal(notifications.filter(a => a.prState === "closed").length, 1);
+    assert.deepEqual(notifications.at(-1)?.sessionIDs, ["ses_test"]);
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    d = make(); await d.init(); await d.scan(); await d.tick();
+    assert.equal(d.activity()[0]?.prState, "closed");
+    assert.equal(notifications.filter(a => a.prState === "closed").length, 1);
+  });
+}
+
+test("a failed PR state lookup does not announce closure or change saved state", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.pull = async () => { throw new Error("GitHub unavailable"); };
+  await assert.rejects(d.scan(), /GitHub unavailable/);
+  assert.equal(d.status()[0]?.pr?.state, "open"); assert.equal(d.activity()[0]?.prState, "open");
+});
+
+test("main session IDs from every follow-up round survive restart for tab cleanup", async () => {
+  const f = fixture(); let session = 0; let d = f.make();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: `ses_${++session}` }); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  for (const id of [50, 60]) {
+    f.github.comments = async () => [{ id, body: "Please handle one more case", user: { login: "alice" } }];
+    await d.scan(); await d.tick();
+  }
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  d = f.make(); await d.init();
+  assert.deepEqual(d.activity()[0]?.sessionIDs, ["ses_1", "ses_2", "ses_3"]);
+});
+
+test("PR state lookup uses the exact PR number and retains merge metadata", async () => {
+  const github = new Github("fake", new AbortController().signal, (async (input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(input), "https://api.github.com/repos/owner/repo/pulls/17");
+    assert.equal(init?.method, "GET");
+    return new Response(JSON.stringify({ number: 17, html_url: "https://github.com/owner/repo/pull/17", state: "closed", merged: true, merged_at: "2026-09-11T20:00:00Z" }));
+  }) as typeof fetch);
+  const pr = await github.pull("owner/repo", 17);
+  assert.equal(pr.state, "closed"); assert.equal(pr.merged, true);
+});
+
+test("issue questions are published once, survive restart, and resume only on an authorized reply", async () => {
+  const f = fixture(); let d = f.make();
+  f.github.ensureComment = async (_repo, _number, marker) => { f.events.push(marker.includes(":question:") ? "question" : "comment"); return marker.includes(":question:") ? 100 : 42; };
+  f.executor.run = async (task, checkpoint) => {
+    await checkpoint({ sessionID: "ses_test", promptAttempted: true });
+    if (!task.question) { await d.question("ses_test", "q1", "Which color?"); await d.question("ses_test", "q1", "Which color?"); }
+    else if (task.question.answer) await checkpoint({ question: { ...task.question, delivered: true, answerSent: true } });
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.ok(!f.events.includes("verify"));
+  assert.equal(f.events.filter(e => e === "question").length, 1);
+  d = f.make(); await d.init();
+  f.github.comments = async () => [{ id: 101, body: "red", user: { login: "stranger" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]?.status, "waiting");
+  f.github.comments = async () => [{ id: 102, body: "blue", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.question?.answer?.body, "blue");
+  await d.tick(); assert.equal(d.status()[0]?.status, "done");
+  assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+});
+test("permission replies require an explicit question-scoped allow or deny", async () => {
+  const f = fixture(); const d = f.make();
+  f.github.ensureComment = async (_r, _n, marker) => marker.includes(":question:") ? 100 : 42;
+  f.executor.run = async (_t, checkpoint) => { await checkpoint({ sessionID: "ses_test" }); await d.question("ses_test", "p1", "May I run this command?", { action: "bash", resources: ["npm test"] }); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.comments = async () => [{ id: 101, body: "sure", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.question?.answer, undefined);
+  f.github.comments = async () => [{ id: 102, body: "/allow p1", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.permissions?.[0]?.allow, true);
+});
+test("an authorized base directive pins both worktree creation and PR target", async () => {
+  const f = fixture(); const branchIssue = { ...issue, body: `${issue.body}\n/base release/next` };
+  f.github.issues = async () => [branchIssue]; f.github.issue = async () => branchIssue;
+  let prepared = "", published = "";
+  f.executor.selectBase = async (_task, _repo, inputs) => {
+    assert.ok(inputs.some(i => i.text.includes("/base release/next")));
+    return { kind: "branch", branch: "release/next" };
+  };
+  f.executor.prepare = async (_t, repo) => { prepared = repo.baseBranch; return { worktree: "/worktree", baseSha: "base" }; };
+  f.github.ensurePull = async (_r, _h, base) => { published = base; return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(prepared, "release/next"); assert.equal(published, "release/next"); assert.equal(d.status()[0]?.baseBranch, "release/next");
+});
+
+test("concurrent questions share one post and recover a lost publication response", async () => {
+  const f = fixture(); let d = f.make(), posts = 0;
+  f.github.ensureComment = async (_r, _n, marker) => {
+    if (!marker.includes(":question:")) return 42;
+    posts++;
+    // Keep the simulated request in flight while both tool calls enter.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (posts === 1) throw new Error("Comment delivery unknown");
+    return 100;
+  };
+  f.executor.run = async (_task, checkpoint) => {
+    await checkpoint({ sessionID: "ses_test" });
+    await Promise.allSettled([d.question("ses_test", "q1", "Which option?"), d.question("ses_test", "q2", "Duplicate parallel request")]);
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.equal(posts, 1);
+  assert.equal(d.status()[0]?.question?.commentID, undefined);
+  d = f.make(); await d.init(); await d.tick();
+  assert.equal(posts, 2); assert.equal(d.status()[0]?.question?.commentID, 100);
+  f.github.comments = async () => [{ id: 101, body: "The second option", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.status, "ready");
+  assert.equal(d.status()[0]?.question?.answer?.id, 101);
+});
+
+test("an ambiguous natural-language base waits in the issue before creating a worktree and survives restart", async () => {
+  const f = fixture(); let d = f.make(), selections = 0;
+  const request = { ...issue, body: `${issue.body}. Please work from develop or release/next.` };
+  f.github.issues = async () => [request]; f.github.issue = async () => request;
+  f.github.ensureComment = async (_r, _n, marker) => { f.events.push(marker.includes(":question:") ? "question" : "comment"); return marker.includes(":question:") ? 100 : 42; };
+  f.executor.selectBase = async (task, _repo, inputs) => {
+    selections++;
+    assert.equal(task.sessionID, undefined); assert.equal(task.worktree, undefined);
+    if (!task.baseDialogue?.length) return { kind: "question", question: "Should I use develop or release/next as the base?" };
+    assert.equal(inputs.at(-1)?.text, "Use branch release/next, please.");
+    assert.match(inputs.at(-1)?.question ?? "", /develop or release/);
+    return { kind: "branch", branch: "release/next" };
+  };
+  f.executor.hasBranch = async (_r, branch) => { assert.equal(branch, "release/next"); return true; };
+  f.executor.prepare = async (task, repo) => { assert.equal(task.baseBranch, "release/next"); assert.equal(repo.baseBranch, "release/next"); f.events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; };
+  await d.init(); await d.scan(); await d.tick();
+  assert.deepEqual(f.events, ["analyze", "comment", "question"]);
+  assert.equal(d.status()[0]?.status, "waiting"); assert.equal(d.status()[0]?.question?.sessionID, undefined);
+  d = f.make(); await d.init(); await d.tick(); assert.equal(selections, 1);
+  f.github.comments = async () => [{ id: 101, body: "Use branch attack", user: { login: "stranger" } }];
+  await d.scan(); await d.tick(); assert.equal(selections, 1);
+  f.github.comments = async () => [{ id: 102, body: "Use branch release/next, please.", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done"); assert.equal(selections, 2);
+  assert.deepEqual(d.status()[0]?.pendingFeedback, []); assert.equal(d.status()[0]?.baseDialogue?.[0]?.answer.id, 102);
+  assert.equal(f.events.filter(e => e === "analyze").length, 1);
+});
+
+test("a missing requested base asks for a correction; Git transport errors do not masquerade as a missing branch", async () => {
+  const f = fixture();
+  f.executor.selectBase = async () => ({ kind: "branch", branch: "develpo" });
+  f.executor.hasBranch = async () => false;
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.equal(d.status()[0]?.baseBranch, undefined);
+  assert.match(d.status()[0]?.question?.text ?? "", /develpo.*does not exist/);
+  assert.ok(!f.events.includes("prepare"));
+  const broken = fixture(); broken.executor.hasBranch = async () => { throw new Error("Git authentication failed"); };
+  const retrying = broken.make(); await retrying.init(); await retrying.scan(); await retrying.tick();
+  assert.equal(retrying.status()[0]?.status, "retry_wait"); assert.equal(retrying.status()[0]?.question, undefined);
+});
+
+test("only authorized text reaches base selection and a selected base is pinned across retries", async () => {
+  const f = fixture(); let selections = 0, prepares = 0;
+  const request = { ...issue, body: "Use branch attacker", user: { login: "stranger" } };
+  f.github.issues = async () => [request]; f.github.issue = async () => request;
+  f.github.comments = async () => [{ id: 1, body: "@deepseek Please use branch develop.", user: { login: "alice" } }];
+  f.executor.selectBase = async (_t, _r, inputs) => { selections++; assert.deepEqual(inputs, [{ text: "@deepseek Please use branch develop." }]); return { kind: "branch", branch: "develop" }; };
+  f.executor.prepare = async (_t, repo) => { assert.equal(repo.baseBranch, "develop"); if (++prepares === 1) throw new Error("Temporary failure"); return { worktree: "/worktree", baseSha: "base" }; };
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.baseBranch, "develop");
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(selections, 1); assert.equal(d.status()[0]?.status, "done");
+});
+
+test("a failed branch-question post is recovered after restart without another model selection", async () => {
+  const f = fixture(); let selections = 0, posts = 0;
+  f.executor.selectBase = async () => { selections++; return { kind: "question", question: "Which branch should I use?" }; };
+  f.github.ensureComment = async (_r, _n, marker) => {
+    if (!marker.includes(":question:")) return 42;
+    if (++posts === 1) throw new Error("Connection lost after posting");
+    return 100;
+  };
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait"); assert.equal(d.status()[0]?.question?.purpose, "base");
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.equal(d.status()[0]?.question?.commentID, 100);
+  assert.equal(selections, 1); assert.equal(posts, 2); assert.ok(!f.events.includes("prepare"));
 });

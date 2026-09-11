@@ -2,9 +2,13 @@ import { execFile } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { GithubOptions, SchedulerOptions, MergeOptions } from "./config.js";
+import { GithubOptions, SchedulerOptions, MergeOptions, Capabilities, BranchName } from "./config.js";
 
 export const EasyOptions = z.object({
+  baseBranch: BranchName.optional(),
+  capabilities: Capabilities.optional(),
+  mediaModel: z.object({ model: z.string().regex(/^[^/\s]+\/\S+$/), capabilities: Capabilities }).strict().optional(),
+  systemPromptFile: z.string().min(1).optional(),
   signature: z.string().trim().min(1).max(200).regex(/^[^\r\n]+$/).optional(),
   autoMerge: MergeOptions.optional(),
   model: z.string().regex(/^[^/\s]+\/\S+$/, "Model must have the form provider/model"),
@@ -70,14 +74,14 @@ export async function resolveEasy(directory: string, raw: unknown, execute = run
   };
   const [user, metadata] = await Promise.all([get("/user"), get(`/repos/${repo}`)]);
   const login = z.object({ login: z.string() }).parse(user).login;
-  const baseBranch = z.object({ default_branch: z.string() }).parse(metadata).default_branch;
+  const baseBranch = options.baseBranch ?? z.object({ default_branch: z.string() }).parse(metadata).default_branch;
   const check = options.check ?? await detectCheck(root);
   if (check === undefined) throw new Error("No tests detected. Run init and accept skip, or pass --skip-tests.");
   const slash = options.model.indexOf("/");
   const stateDirectory = join(common, "opencode2-automation");
-  const github = GithubOptions.parse({ signature: options.signature ?? `${login}[OpenCode2]`, autoMerge: options.autoMerge, ownerDirectory: root, stateDirectory,
+  const github = GithubOptions.parse({ systemPromptFile: options.systemPromptFile, signature: options.signature ?? `${login}[OpenCode2]`, autoMerge: options.autoMerge, ownerDirectory: root, stateDirectory,
     repositories: [{ repo, directory: root, baseBranch, allowedAuthors: options.authors ?? [login], checks: check === false ? [] : [check] }],
-    routes: { [options.trigger]: { agent: "build", model: { providerID: options.model.slice(0, slash), id: options.model.slice(slash + 1) } } },
+    routes: { [options.trigger]: { agent: "build", capabilities: options.capabilities, mediaModel: options.mediaModel ? { capabilities: options.mediaModel.capabilities, model: { providerID: options.mediaModel.model.split("/")[0], id: options.mediaModel.model.slice(options.mediaModel.model.indexOf("/") + 1) } } : undefined, model: { providerID: options.model.slice(0, slash), id: options.model.slice(slash + 1) } } },
   });
   const scheduler = SchedulerOptions.parse({ ownerDirectory: root, stateDirectory, jobs: [{ id: "github-issues", everySeconds: options.everySeconds }] });
   return { github, scheduler, repo, login, check };

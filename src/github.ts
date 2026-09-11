@@ -9,7 +9,7 @@ export const Issue = z.object({
 export type Issue = z.infer<typeof Issue>;
 export const Comment = z.object({ id: z.number(), body: z.string(), user: z.object({ login: z.string(), type: z.string().optional() }) });
 export type Comment = z.infer<typeof Comment>;
-const Pull = z.object({ number: z.number(), html_url: z.string().url(), state: z.string() });
+const Pull = z.object({ number: z.number(), html_url: z.string().url(), state: z.string(), merged: z.boolean().optional(), merged_at: z.string().nullable().optional() });
 export type Pull = z.infer<typeof Pull>;
 
 export class GithubError extends Error {
@@ -59,6 +59,9 @@ export class Github {
   async findPull(repo: string, branch: string): Promise<Pull | undefined> {
     const head = encodeURIComponent(`${repo.split("/")[0]}:${branch}`);
     return (await this.pages(`/repos/${repo}/pulls?state=all&head=${head}`, Pull))[0];
+  }
+  async pull(repo: string, number: number): Promise<Pull> {
+    return Pull.parse(await this.request(`/repos/${repo}/pulls/${number}`));
   }
   async ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull> {
     return await this.findPull(repo, branch) ?? Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body: await this.signed(body) }));

@@ -6,6 +6,9 @@ export const GithubRpc = Rpc.define({
   id: "automation.github",
   events: { activity: { schema: Activity } },
   methods: {
+    runtime: { input: z.object({ sessionID: z.string() }), output: z.json().nullable() },
+    question: { input: z.object({ sessionID: z.string(), id: z.string(), text: z.string().min(1).max(20000), permission: z.object({ action: z.string(), resources: z.array(z.string()) }).optional() }), output: z.object({ id: z.string() }) },
+    helper: { input: z.object({ sessionID: z.string(), callID: z.string(), capability: z.enum(["vision", "audio"]) }), output: z.object({ id: z.string() }) },
     diagnose: { input: z.object({ sessionID: z.string() }), output: z.object({ exists: z.boolean(), error: z.string().optional() }) },
     scan: { input: z.object({}).strict(), output: z.object({ queued: z.number(), ignored: z.number() }) },
     status: { input: z.object({}).strict(), output: z.array(z.json()) },

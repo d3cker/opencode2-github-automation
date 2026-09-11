@@ -3,16 +3,28 @@ import { z } from "zod";
 import { type GithubOptions, type Repository, Route, matchRoute } from "./config.js";
 import { GithubError, Issue, Comment, type Pull } from "./github.js";
 import { Serial, redact, type Store } from "./state.js";
+import { branchText, type BranchInput, type BaseChoice } from "./branch.js";
 import { activityOf, type Activity } from "./activity.js";
+import { AnalysisDecision } from "./analysis.js";
 
+export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sessionID: z.string().optional(), purpose: z.enum(["base", "analysis"]).optional(), commentID: z.number().optional(),
+  permission: z.object({ action: z.string(), resources: z.array(z.string()) }).optional(),
+  answer: Comment.optional(), delivered: z.boolean().optional(), answerSent: z.boolean().optional() });
 const Phase = z.enum(["queued", "analyzing", "commented", "running", "verifying", "publishing", "pr_opened"]);
 export const Task = z.object({
   key: z.string(), repo: z.string(), issue: Issue, route: Route.optional(),
-  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done"]),
+  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done", "waiting"]),
   attempts: z.number(), nextAt: z.number(), createdAt: z.number(),
   analysis: z.string().optional(), commentID: z.number().optional(),
+  analysisDecision: AnalysisDecision.optional(),
+  analysisDialogue: z.array(z.object({ question: z.string(), answer: Comment })).optional(),
+  baseBranch: z.string().optional(), question: PendingQuestion.optional(),
+  baseDialogue: z.array(z.object({ question: z.string(), answer: Comment })).optional(),
+  permissions: z.array(z.object({ sessionID: z.string(), action: z.string(), resources: z.array(z.string()), allow: z.boolean() })).optional(),
+  helpers: z.array(z.object({ id: z.string(), parentID: z.string(), capability: z.enum(["vision", "audio"]) })).optional(),
   branch: z.string(), worktree: z.string().optional(), baseSha: z.string().optional(),
   sessionID: z.string().optional(), promptAttempted: z.boolean().optional(),
+  sessionIDs: z.array(z.string()).optional(),
   sessionReady: z.boolean().optional(), round: z.number().int().positive().optional(),
   source: z.enum(["issue", "comment"]).optional(),
   feedback: z.array(Comment).optional(), pendingFeedback: z.array(Comment).optional(), commentCursor: z.number().optional(),
@@ -26,6 +38,7 @@ export type Task = z.infer<typeof Task>;
 export const Queue = z.object({ version: z.literal(1), tasks: z.array(Task) });
 export type Queue = z.infer<typeof Queue>;
 export class Blocked extends Error {}
+export class WaitingForAnswer extends Error {}
 
 export interface GithubPort {
   mergeApproved?(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean>;
@@ -34,10 +47,13 @@ export interface GithubPort {
   comments(repo: string, number: number): Promise<Comment[]>;
   ensureComment(repo: string, number: number, marker: string, body: string): Promise<number>;
   findPull(repo: string, branch: string): Promise<Pull | undefined>;
+  pull(repo: string, number: number): Promise<Pull>;
   ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull>;
 }
 export interface Executor {
-  analyze(task: Task): Promise<string>;
+  selectBase(task: Task, repo: Repository, inputs: BranchInput[]): Promise<BaseChoice>;
+  hasBranch(repo: Repository, branch: string): Promise<boolean>;
+  analyze(task: Task): Promise<AnalysisDecision>;
   title(task: Task): Promise<string>;
   prepare(task: Task, repo: Repository): Promise<{ worktree: string; baseSha: string }>;
   run(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>): Promise<void>;
@@ -52,6 +68,7 @@ export class Dispatcher {
   private scanning?: Promise<{ queued: number; ignored: number }>;
   private working?: Promise<void>;
   private maintenance?: Promise<boolean>;
+  private questionPosts = new Map<string, Promise<number>>();
   constructor(private options: GithubOptions, private store: Store<Queue>, private github: GithubPort, private executor: Executor, private signal: AbortSignal, private secrets: string[] = [], private now = Date.now, private notify: (activity: Activity) => Promise<void> = async () => {}) {}
   async init() { this.queue = await this.store.load(); }
   status() { return structuredClone(this.queue.tasks); }
@@ -60,7 +77,9 @@ export class Dispatcher {
     this.signal.throwIfAborted();
     let announce = false;
     await this.serial.run(async () => {
-      announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed"].includes(patch.status));
+      announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed", "waiting"].includes(patch.status));
+      announce ||= patch.pr?.state === "closed" && task.pr?.state !== "closed";
+      if (patch.sessionID) task.sessionIDs = [...new Set([...task.sessionIDs ?? [], ...[task.previousSessionID, task.sessionID, patch.sessionID].filter((id): id is string => Boolean(id))])];
       Object.assign(task, patch);
       await this.store.save(this.queue);
     });
@@ -74,6 +93,13 @@ export class Dispatcher {
   private async scanOnce() {
     let queued = 0, ignored = 0;
     for (const repo of this.options.repositories) {
+      // Watch PR state independently of automatic merging, issue state, and
+      // worker progress so manual closure/merge also reaches attached TUIs.
+      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && t.pr && !t.merged)) {
+        const pr = await this.github.pull(repo.repo, task.pr!.number);
+        const merged = pr.merged === true || Boolean(pr.merged_at);
+        if (pr.state !== task.pr!.state || merged) await this.update(task, { pr, ...(merged ? { merged: true } : {}) });
+      }
       const issues = await this.github.issues(repo.repo);
       for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo)) {
         if (!issues.some(i => i.number === tracked.issue.number)) issues.push(await this.github.issue(repo.repo, tracked.issue.number));
@@ -85,6 +111,8 @@ export class Dispatcher {
         const existing = this.queue.tasks.find(t => t.key === key);
         if (!existing && issue.state !== "open") { ignored++; continue; }
         const comments = await this.github.comments(repo.repo, issue.number);
+        // A person may share the posting account with the bot. Exclude marked
+        // automation messages, never the authenticated account's login itself.
         const authorized = comments.filter(c => this.authorized(c.user.login, repo.allowedAuthors) && c.user.type !== "Bot" && c.body.trim() && !c.body.includes("<!-- opencode2:"));
         const cursor = Math.max(0, ...comments.map(c => c.id));
         if (existing) {
@@ -92,7 +120,20 @@ export class Dispatcher {
           await this.serial.run(async () => {
             const previousCursor = existing.commentCursor ?? existing.commentID ?? 0;
             const fresh = authorized.filter(c => c.id > previousCursor);
-            Object.assign(existing, { pendingFeedback: [...existing.pendingFeedback ?? [], ...fresh], commentCursor: Math.max(cursor, previousCursor) });
+            let remaining = fresh;
+            const q = existing.question;
+            if (q && !q.answer && q.commentID && issue.state === "open") {
+              // Search all comments after the published question, including a reply seen during POST reconciliation.
+              const reply = authorized.find(c => c.id > q.commentID! && (!q.permission || [`/allow ${q.id}`, `/deny ${q.id}`].includes(c.body.trim())));
+              if (reply) {
+                q.answer = reply;
+                if (q.permission && q.sessionID) existing.permissions = [...existing.permissions ?? [], { sessionID: q.sessionID, ...q.permission, allow: reply.body.trim().startsWith("/allow ") }];
+                if (existing.status === "waiting") existing.status = "ready";
+                remaining = remaining.filter(c => c.id !== reply.id);
+                existing.pendingFeedback = (existing.pendingFeedback ?? []).filter(c => c.id !== reply.id);
+              }
+            }
+            Object.assign(existing, { pendingFeedback: [...existing.pendingFeedback ?? [], ...remaining], commentCursor: Math.max(cursor, previousCursor) });
             await this.store.save(this.queue);
             if (fresh.length) queued++; else ignored++;
           });
@@ -129,11 +170,18 @@ export class Dispatcher {
     return this.working;
   }
   private async workOnce() {
+    // A lost comment response must not strand a waiting question after a restart.
+    for (const pending of this.queue.tasks.filter(t => t.status === "waiting" && t.question && !t.question.commentID && t.nextAt <= this.now())) {
+      const q = pending.question!;
+      try { await this.publishQuestion(pending, q); }
+      catch (error) { if (this.signal.aborted) return; await this.update(pending, { error: redact(error, this.secrets), nextAt: this.now() + 60_000 }); }
+    }
     await this.serial.run(async () => {
       const finished = this.queue.tasks.find(t => t.status === "done" && t.pendingFeedback?.length);
       if (!finished) return;
       Object.assign(finished, { round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
         phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
+        analysisDecision: undefined, analysisDialogue: undefined, question: undefined,
         sessionID: undefined, sessionReady: false, promptAttempted: false, checks: undefined, commit: undefined, error: undefined });
       await this.store.save(this.queue);
     });
@@ -143,7 +191,8 @@ export class Dispatcher {
     const task = activeSession ?? resumable.find(t => t.nextAt <= this.now());
     if (task && task.nextAt > this.now()) return;
     if (!task) { await this.mergeOnce(); return; }
-    const repo = this.options.repositories.find(r => r.repo === task.repo);
+    const configuredRepo = this.options.repositories.find(r => r.repo === task.repo);
+    let repo = configuredRepo ? { ...configuredRepo, baseBranch: task.baseBranch ?? configuredRepo.baseBranch } : undefined;
     try {
       if (!repo) throw new Blocked("Repository removed from configuration");
       if (!task.route) throw new Blocked("No unambiguous execution route");
@@ -155,27 +204,32 @@ export class Dispatcher {
         if (followup) {
           const pr = await this.github.findPull(task.repo, task.branch);
           if (!pr || pr.state !== "open") throw new Blocked("The original PR is closed or merged; reopen it or create a new issue");
-          if (!task.feedback?.every(c => this.authorized(c.user.login, repo.allowedAuthors))) throw new Blocked("Feedback author no longer authorized");
+          if (!task.feedback?.every(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors))) throw new Blocked("Feedback author no longer authorized");
         } else if (task.source !== "comment" && !this.authorized(latest.user.login, repo.allowedAuthors)) throw new Blocked("Issue author no longer authorized");
-        if (!followup && task.source === "comment" && !task.feedback?.some(c => this.authorized(c.user.login, repo.allowedAuthors) && matchRoute(c.body, this.options.routes))) throw new Blocked("No authorized routing comment remains in the task");
+        if (!followup && task.source === "comment" && !task.feedback?.some(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors) && matchRoute(c.body, this.options.routes))) throw new Blocked("No authorized routing comment remains in the task");
         const route = followup || task.source === "comment" ? task.route : matchRoute(latest.body ?? "", this.options.routes);
         if (!route) throw new Blocked("Routing tag removed");
         if (task.analysis && (latest.body !== task.issue.body || latest.title !== task.issue.title || JSON.stringify(route) !== JSON.stringify(task.route))) throw new Blocked("Issue or route changed after analysis; review before restarting");
         await this.update(task, { issue: latest, route });
       }
       if (task.phase === "queued" || task.phase === "analyzing") {
-        await this.update(task, { phase: "analyzing" });
-        if (!task.analysis) await this.update(task, { analysis: await this.executor.analyze(task) });
-        const commentID = await this.github.ensureComment(task.repo, task.issue.number, `<!-- opencode2:${task.key}:analysis:v${task.round ?? 1} -->`, task.analysis!);
-        await this.update(task, { commentID, phase: "commented", attempts: 0 });
+        await this.resolveAnalysis(task, repo);
       }
       if (task.phase === "commented") {
+        // Saved pre-upgrade analyses had no decision. Reassess them before any
+        // implementation, preserving an already-pending base question first.
+        if (task.question?.purpose === "base") await this.resolveBase(task, repo);
+        if (!task.analysisDecision) await this.resolveAnalysis(task, repo);
+        if (task.analysisDecision?.kind !== "proceed") throw new WaitingForAnswer("Waiting for clarification before implementation");
         if (!task.commentID) throw new Blocked("Missing confirmed analysis comment");
+        if (!task.baseBranch) await this.resolveBase(task, repo);
+        repo = { ...repo, baseBranch: task.baseBranch! };
         const workspace = await this.executor.prepare(task, repo);
         await this.update(task, { ...workspace, phase: "running", attempts: 0 });
       }
       if (task.phase === "running") {
         await this.executor.run(task, patch => this.update(task, patch));
+        if (task.question && !task.question.delivered) throw new WaitingForAnswer("Waiting for a reply in the GitHub issue");
         await this.update(task, { phase: "verifying", attempts: 0 });
       }
       if (task.phase === "verifying") {
@@ -196,22 +250,76 @@ export class Dispatcher {
       }
     } catch (error) {
       if (this.signal.aborted) return;
+      if (error instanceof WaitingForAnswer) { await this.update(task, { status: task.question?.answer ? "ready" : "waiting", error: undefined }); return; }
       const attempts = task.attempts + 1;
       const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
       await this.update(task, { attempts, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
     }
   }
+  private async resolveAnalysis(task: Task, repo: Repository) {
+    await this.update(task, { phase: "analyzing" });
+    if (task.analysisDialogue?.some(d => !this.authorized(d.answer.user.login, repo.allowedAuthors))) throw new Blocked("A clarification reply author is no longer authorized");
+    const q = task.question;
+    if (q?.purpose === "analysis" && !q.delivered) {
+      if (!q.answer) { await this.publishQuestion(task, q); throw new WaitingForAnswer("Waiting for the issue reply before implementation"); }
+      if (!this.authorized(q.answer.user.login, repo.allowedAuthors)) throw new Blocked("The clarification reply author is no longer authorized");
+      // Save the answer and invalidate the previous decision in one checkpoint.
+      // An unclear reply is assessed again and can produce another question.
+      await this.update(task, {
+        analysisDialogue: [...task.analysisDialogue ?? [], { question: q.text, answer: q.answer }],
+        question: { ...q, delivered: true }, analysisDecision: undefined,
+      });
+    }
+    if (!task.analysisDecision) {
+      const decision = AnalysisDecision.parse(await this.executor.analyze(task));
+      await this.update(task, { analysisDecision: decision, analysis: decision.comment });
+    }
+    const decision = task.analysisDecision!;
+    if (decision.kind === "question") {
+      const id = `analysis_${createHash("sha256").update(JSON.stringify({ key: task.key, round: task.round ?? 1, dialogue: task.analysisDialogue ?? [], decision })).digest("hex").slice(0, 24)}`;
+      await this.askTask(task, { id, text: `${decision.comment}\n\n${decision.question}`, purpose: "analysis" });
+      throw new WaitingForAnswer("Waiting for the issue reply before implementation");
+    }
+    const lastAnswer = task.analysisDialogue?.at(-1)?.answer.id;
+    const marker = `<!-- opencode2:${task.key}:analysis:v${task.round ?? 1}${lastAnswer === undefined ? "" : `:reply:${lastAnswer}`} -->`;
+    const commentID = await this.github.ensureComment(task.repo, task.issue.number, marker, decision.comment);
+    await this.update(task, { commentID, phase: "commented", attempts: 0, ...(task.question?.purpose === "analysis" ? { question: undefined } : {}) });
+  }
+  private async resolveBase(task: Task, repo: Repository) {
+    const q = task.question;
+    if (q?.purpose === "base" && !q.delivered) {
+      if (!q.answer) { await this.publishQuestion(task, q); throw new WaitingForAnswer("Waiting for a base branch reply"); }
+      if (!this.authorized(q.answer.user.login, repo.allowedAuthors)) throw new Blocked("The branch reply author is no longer authorized");
+      await this.update(task, { baseDialogue: [...task.baseDialogue ?? [], { question: q.text, answer: q.answer }], question: { ...q, delivered: true, answerSent: true } });
+    }
+    const inputs: BranchInput[] = [
+      ...(this.authorized(task.issue.user.login, repo.allowedAuthors) ? [task.issue.title, task.issue.body ?? ""].map(text => ({ text })) : []),
+      ...(task.feedback ?? []).filter(c => this.authorized(c.user.login, repo.allowedAuthors)).map(c => ({ text: c.body })),
+      ...(task.analysisDialogue ?? []).filter(d => this.authorized(d.answer.user.login, repo.allowedAuthors)).map(d => ({ text: d.answer.body, question: d.question })),
+      ...(task.baseDialogue ?? []).filter(d => this.authorized(d.answer.user.login, repo.allowedAuthors)).map(d => ({ text: d.answer.body, question: d.question })),
+    ].map(input => ({ ...input, text: branchText(input.text) })).filter(input => input.text);
+    let choice = await this.executor.selectBase(task, repo, inputs);
+    if (choice.kind === "branch" && !await this.executor.hasBranch(repo, choice.branch)) {
+      choice = { kind: "question", question: `Branch ${JSON.stringify(choice.branch)} does not exist on origin. Which existing branch should I use as the base? You can reply in your own words.` };
+    }
+    if (choice.kind === "question") {
+      const id = `base_${createHash("sha256").update(JSON.stringify({ key: task.key, inputs, question: choice.question })).digest("hex").slice(0, 24)}`;
+      await this.askTask(task, { id, text: choice.question, purpose: "base" });
+      throw new WaitingForAnswer("Waiting for a base branch reply");
+    }
+    await this.update(task, { baseBranch: choice.branch, ...(task.question?.purpose === "base" ? { question: undefined } : {}) });
+  }
   private async mergeOnce() {
     if (!this.options.autoMerge.enabled || !this.github.mergeApproved) return;
     for (const task of this.queue.tasks) {
-      if (task.status !== "done" || !task.pr || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
+      if (task.status !== "done" || !task.pr || task.pr.state === "closed" || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
       const repo = this.options.repositories.find(r => r.repo === task.repo);
       if (!repo) continue;
       // Older queues start watching now; historical approvals must not trigger an unexpected merge.
       if (!task.publishedAt) { await this.update(task, { publishedAt: this.now() }); continue; }
       try {
         await this.scan(); // Pick up issue feedback before considering a completed task for merge.
-        if (task.pendingFeedback?.length) continue;
+        if (task.pendingFeedback?.length || task.pr.state === "closed") continue;
         const merged = await this.github.mergeApproved(task.repo, task.pr.number, task.commit, task.publishedAt, repo.allowedAuthors, this.options.autoMerge);
         if (merged) {
           await this.github.ensureComment(task.repo, task.pr.number, `<!-- opencode2:${task.key}:merged -->`, "Pull request merged.");
@@ -222,6 +330,54 @@ export class Dispatcher {
         await this.update(task, { mergeError: redact(error, this.secrets), mergeNextAt: Math.max(this.now() + 60_000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
       }
     }
+  }
+  runtime(sessionID: string) {
+    const task = this.queue.tasks.find(t => t.sessionID === sessionID || t.helpers?.some(h => h.id === sessionID && h.parentID === t.sessionID));
+    if (!task) return null;
+    const result = JSON.parse(JSON.stringify(task)) as Task;
+    const matching = Object.values(this.options.routes).filter(r => r.agent === task.route?.agent && r.model.id === task.route?.model.id && r.model.providerID === task.route?.model.providerID);
+    const configured = matching.length === 1 ? matching[0] : undefined;
+    if (result.route && configured) result.route = { ...result.route, capabilities: configured.capabilities, mediaModel: configured.mediaModel };
+    return result;
+  }
+  async question(sessionID: string, id: string, text: string, permission?: { action: string; resources: string[] }) {
+    const task = this.queue.tasks.find(t => t.sessionID === sessionID);
+    if (!task || task.phase !== "running" || !["ready", "retry_wait", "waiting"].includes(task.status)) throw new Error("No active bot task for this session");
+    return this.askTask(task, { id, text, sessionID, ...(permission ? { permission } : {}) });
+  }
+  private async askTask(task: Task, input: z.infer<typeof PendingQuestion>) {
+    let question!: z.infer<typeof PendingQuestion>;
+    await this.serial.run(async () => {
+      if (!task.question || task.question.delivered) task.question = input;
+      question = task.question; await this.store.save(this.queue);
+    });
+    await this.publishQuestion(task, question);
+    return { id: question.id };
+  }
+  private async publishQuestion(task: Task, question: z.infer<typeof PendingQuestion>) {
+    if (!question.commentID) {
+      const body = `Question (${question.id})\n\n${question.text}\n\n${question.permission ? `Reply with /allow ${question.id} or /deny ${question.id}.` : "Reply in this issue to continue. Only configured authors can answer."}`;
+      const marker = `<!-- opencode2:${task.key}:question:${question.id} -->`;
+      const post = this.questionPosts.get(marker) ?? this.github.ensureComment(task.repo, task.issue.number, marker, body);
+      this.questionPosts.set(marker, post);
+      try {
+        const commentID = await post;
+        await this.serial.run(async () => {
+          if (task.question?.id === question.id) task.question.commentID = commentID;
+          await this.store.save(this.queue);
+        });
+      } finally { if (this.questionPosts.get(marker) === post) this.questionPosts.delete(marker); }
+    }
+  }
+  async helper(sessionID: string, callID: string, capability: "vision" | "audio") {
+    const task = this.queue.tasks.find(t => t.sessionID === sessionID);
+    if (!task || task.phase !== "running" || task.question && !task.question.delivered) throw new Error("No active main bot session available for delegation");
+    const id = `ses_${createHash("sha256").update(`${sessionID}:${callID}`).digest("hex").slice(0, 32)}`;
+    await this.serial.run(async () => {
+      if (!task.helpers?.some(h => h.id === id)) task.helpers = [...task.helpers ?? [], { id, parentID: sessionID, capability }];
+      await this.store.save(this.queue);
+    });
+    return { id };
   }
   async retry(key: string, restartSession: boolean) {
     if (this.working || this.maintenance) throw new Error("Worker is busy; retry after it finishes");

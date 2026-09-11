@@ -1,12 +1,14 @@
 {
   "name": "opencode2-automation",
-  "version": "0.4.0-beta.2",
+  "version": "0.5.0-beta.5",
   "description": "Issue-to-PR automation for OpenCode 2 with a scheduler and GitHub dispatcher",
   "main": "./dist/index.js",
   "files": [
     "dist",
     "README.md",
-    "docs/advanced.md"
+    "docs",
+    "prompts",
+    "scripts/postinstall.mjs"
   ],
   "bin": {
     "opencode2-automation": "./dist/setup.js"
@@ -23,11 +25,14 @@
     "./rpc": "./dist/rpc.js"
   },
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "eslint src test scripts eslint.config.mjs --max-warnings 0",
     "test": "node --import tsx --test test/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "package:check": "node scripts/package-check.mjs",
     "install-local": "bash scripts/install-local.sh"
   },
   "dependencies": {
@@ -37,10 +42,15 @@
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
     "@types/proper-lockfile": "^4.1.4",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "semver": "^7.8.5",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.70.0"
   },
   "private": true
 }
