@@ -2,17 +2,38 @@
 
 ## Questions in GitHub
 
+The first analysis returns a structured decision: proceed or ask a question.
+Requests for proposals or a choice before implementation must ask and wait.
+The dispatcher saves the decision and pending question before publishing a
+single signed comment containing the proposals and question. It creates no
+worktree or implementation session until an authorized reply resolves the choice.
+Publishing proposals alone never authorizes implementation.
+
+Replies to these initial questions return to analysis first. An unclear reply
+causes another question; an invalid model response or a connection failure
+retries without starting work. Once the choice is resolved, its dialogue is
+passed to the implementation session and base-branch selection. Saved analyses
+from older versions are reassessed before starting implementation; an upgrade
+does not undo changes or PRs that have already been produced.
+
 The bot uses `ask_issue` to post clarification questions with the configured
 signature. Built-in question tools are redirected for bot sessions and their
 native subagents; ordinary interactive sessions keep their usual question UI.
 The task enters `waiting`, stops implementation, and does not publish a PR.
 Other queued issues can proceed while it waits.
 
-Reply in the same issue using an account in `authors`. The next scan delivers
-the first authorized reply after the question to the main session, without
-requiring another mention. A native worker's question also resumes the main
+Reply in the same issue using an account in `authors`. The next scan accepts
+the first authorized reply after the question, without requiring another mention.
+Initial questions return to analysis; questions from an implementation session
+resume that session. A native worker's question also resumes the main
 agent, which can continue or delegate again with the answer. Other comments
 remain queued as feedback. Edits to existing comments are not replies.
+
+You and the bot may use the same GitHub account or different accounts. The
+dispatcher excludes plugin messages by their `<!-- opencode2:... -->` markers,
+not by excluding the posting account's login. GitHub Bot accounts and unauthorized
+authors are also excluded. A regular comment from the shared account can answer
+a question; the bot's own marked question, acknowledgement, or other post cannot.
 
 For permission requests, use the exact `/allow QUESTION_ID` or `/deny QUESTION_ID`
 shown in the question as your entire reply. Plain conversation does not grant

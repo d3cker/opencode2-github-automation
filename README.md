@@ -165,6 +165,12 @@ instructions in Markdown. Existing JSON files still work: omitted capabilities
 mean `text`, and no media helper is assumed. Add the fields below to enable it.
 Keep your existing `trigger`, `signature`, and `authors` settings.
 
+The initial analysis now pauses for your reply when it asks you to choose or
+approve a proposal. No implementation session starts until that choice is
+resolved. This also works when you and the bot post from the same GitHub account;
+marked bot comments never count as your answer. No configuration changes are
+needed for this fix.
+
 Existing global loader directories may be named `d3ckerbot`. Keep those loaders
 when updating; do not register a second copy under `opencode-automation`. When
 uninstalling, use the name of the directory you originally created.
@@ -190,7 +196,7 @@ git switch codex/issue-dialogue-capabilities
 git pull --ff-only
 ```
 
-Then complete update steps 2 and 3 (`0.5.0-beta.2`). Reopen each project you want
+Then complete update steps 2 and 3 (`0.5.0-beta.3`). Reopen each project you want
 the restarted service to handle.
 
 ## 4. Remove automation from one project
@@ -323,6 +329,9 @@ if you want media support with a text-only main model.
 
 - **Questions:** reply in the issue as an account in `authors`; no repeated
   mention is needed. The bot enters `waiting` and resumes after the next scan.
+  Questions in the first analysis block worktree and session creation. Unclear
+  replies prompt another question. You may use the same account as the bot;
+  its marked comments are excluded from replies.
   Permission questions require the exact `/allow QUESTION_ID` or
   `/deny QUESTION_ID` shown in the comment. Explicit OpenCode deny rules remain.
 - **Base branch:** write naturally, such as "use branch develop" or "work from

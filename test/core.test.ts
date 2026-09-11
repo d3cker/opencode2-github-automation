@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { GithubOptions, Job, matchRoute } from "../src/config.js";
 import { Scheduler } from "../src/scheduler.js";
-import { Dispatcher, Blocked, type Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
+import { Dispatcher, Blocked, Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
 import { JsonStore, acquire, type Store } from "../src/state.js";
-import { Github, GithubError, type Issue } from "../src/github.js";
+import { Github, GithubError, type Issue, type Comment } from "../src/github.js";
 
 const route = { agent: "build", model: { providerID: "deepseek", id: "test-model" } };
 const options = GithubOptions.parse({ ownerDirectory: "/repo", stateDirectory: "/state", repositories: [{ repo: "owner/repo", directory: "/repo", baseBranch: "main", allowedAuthors: ["alice"], checks: [["npm", "test"]] }], routes: { "@deepseek": route } });
@@ -33,7 +33,7 @@ function fixture() {
     selectBase: async (_task, repo) => ({ kind: "branch", branch: repo.baseBranch }),
     hasBranch: async () => true,
     title: async () => "Repair counter increment",
-    analyze: async () => { events.push("analyze"); return "Problem and verification plan"; },
+    analyze: async () => { events.push("analyze"); return { kind: "proceed", comment: "Problem and verification plan" }; },
     prepare: async () => { events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; },
     run: async (_, checkpoint) => { events.push("run"); await checkpoint({ sessionID: "ses_test" }); },
     verify: async () => { events.push("verify"); return { checks: ["npm test passed"], commit: "sha" }; },
@@ -42,6 +42,192 @@ function fixture() {
   const make = () => new Dispatcher(options, store, github, executor, new AbortController().signal, [], () => time);
   return { events, store, github, executor, make, advance: () => { time += 4_000_000; } };
 }
+
+function proposalFixture(botLogin = "alice") {
+  const f = fixture();
+  const comments: Comment[] = [];
+  let nextID = 20;
+  const addComment = (body: string, login = "alice", type = "User") => {
+    const comment = { id: nextID++, body, user: { login, type } };
+    comments.push(comment); return comment;
+  };
+  const request = { ...issue, title: "Questions test", body: "I would like new sorting algorithms in scripts/. Give me some proposals before you start implementing. @deepseek" };
+  f.github.issues = async () => [request]; f.github.issue = async () => request;
+  f.github.comments = async () => structuredClone(comments);
+  f.github.ensureComment = async (_repo, _number, marker, body) => {
+    const prior = comments.find(c => c.body.startsWith(marker));
+    if (prior) return prior.id;
+    const isQuestion = marker.includes(":question:");
+    // The decision and pending question must be durable before POST starts.
+    if (isQuestion) assert.ok(f.store.data.tasks[0]?.question);
+    f.events.push(isQuestion ? "question" : "comment");
+    return addComment(`${marker}\n${body}\n\n${botLogin}[OpenCode2]`, botLogin).id;
+  };
+  f.executor.analyze = async task => {
+    f.events.push("analyze");
+    if (task.analysisDialogue?.at(-1)?.answer.body === "Implement heapsort only. Use branch develop.") {
+      return { kind: "proceed", comment: "I will implement heapsort only, then verify it. Code has not yet been inspected." };
+    }
+    return { kind: "question", comment: "Proposals: heapsort or a Timsort-style hybrid. Code has not yet been inspected.", question: "Which algorithm should I implement?" };
+  };
+  return { ...f, comments, addComment };
+}
+
+for (const botLogin of ["alice", "automation-service"]) {
+  test(`analysis questions wait across scans and restart with ${botLogin === "alice" ? "a shared" : "a separate"} posting account`, async () => {
+    const f = proposalFixture(botLogin);
+    // An older comment cannot answer a question that has not been posted yet.
+    f.addComment("An earlier request");
+    let d = f.make(); await d.init(); await d.scan(); await d.tick();
+    assert.deepEqual(f.events, ["analyze", "question"]);
+    const waiting = d.status()[0]!;
+    assert.equal(waiting.status, "waiting"); assert.equal(waiting.phase, "analyzing");
+    assert.equal(waiting.question?.purpose, "analysis");
+    assert.equal(waiting.sessionID, undefined); assert.equal(waiting.worktree, undefined);
+    // All robot posts carry markers, even when the robot uses the person's login.
+    f.addComment("<!-- opencode2:owner/repo#1:analysis:v1 --> Implement heapsort only. Use branch develop.", botLogin);
+    f.addComment("Implement heapsort only. Use branch develop.", "stranger");
+    f.addComment("Implement heapsort only. Use branch develop.", "alice", "Bot");
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    f.advance(); d = f.make(); await d.init();
+    for (let i = 0; i < 3; i++) { await d.scan(); await d.tick(); }
+    assert.equal(d.status()[0]?.status, "waiting");
+    assert.equal(d.status()[0]?.question?.answer, undefined);
+    assert.deepEqual(f.events, ["analyze", "question"]);
+    const answer = f.addComment("Implement heapsort only. Use branch develop.");
+    f.executor.selectBase = async (task, _repo, inputs) => {
+      assert.equal(task.analysisDialogue?.[0]?.answer.id, answer.id);
+      assert.ok(inputs.some(i => i.text === answer.body));
+      return { kind: "branch", branch: "develop" };
+    };
+    f.executor.run = async task => {
+      assert.deepEqual(task.analysisDialogue?.map(d => d.answer.id), [answer.id]);
+      assert.equal(task.question, undefined); f.events.push("run");
+    };
+    await d.scan(); await d.tick();
+    assert.equal(d.status()[0]?.status, "done"); assert.equal(d.status()[0]?.baseBranch, "develop");
+    assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+    assert.deepEqual(f.events, ["analyze", "question", "analyze", "comment", "prepare", "run", "verify", "push", "pr"]);
+    await d.scan(); await d.tick();
+    assert.equal(f.events.filter(e => e === "run").length, 1);
+  });
+}
+
+test("an unclear answer asks again instead of authorizing a default, and only a new reply can resolve it", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  const first = d.status()[0]!.question!;
+  f.addComment("Not sure yet");
+  await d.scan(); await d.tick();
+  const second = d.status()[0]!.question!;
+  assert.notEqual(second.id, first.id); assert.ok(second.commentID! > first.commentID!);
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+  d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.question?.answer, undefined);
+  assert.ok(!f.events.includes("prepare"));
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 2);
+});
+
+test("a lost analysis-question POST response recovers the same comment and a reply seen before reconciliation", async () => {
+  const f = proposalFixture(); let d = f.make();
+  const post = f.github.ensureComment; let lose = true;
+  f.github.ensureComment = async (...args) => {
+    const id = await post(...args);
+    if (lose) { lose = false; throw new Error("Connection lost after posting"); }
+    return id;
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.equal(d.status()[0]?.question?.commentID, undefined);
+  const id = d.status()[0]?.question?.id;
+  const reply = f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); // Seen before the question's comment ID was reconciled.
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.question?.id, id);
+  assert.deepEqual(f.events, ["analyze", "question"]);
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.[0]?.answer.id, reply.id);
+  assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+});
+
+test("a failed model reassessment preserves the accepted reply exactly once across restart", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  const analyze = f.executor.analyze;
+  f.executor.analyze = async () => { throw new Error("Model unavailable"); };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.equal(d.status()[0]?.analysisDecision, undefined);
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+  assert.ok(!f.events.includes("prepare"));
+  f.advance(); f.executor.analyze = analyze; d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  assert.equal(d.status()[0]?.analysisDialogue?.length, 1);
+});
+
+test("a closed issue stays blocked after a clarification reply", async () => {
+  const f = proposalFixture(), d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan();
+  f.github.issue = async () => ({ ...issue, state: "closed" });
+  await d.tick();
+  assert.equal(d.status()[0]?.status, "blocked"); assert.ok(!f.events.includes("prepare"));
+});
+
+test("legacy published prose is reassessed before a worktree is created", async () => {
+  const f = proposalFixture(); let d = f.make();
+  await d.init(); await d.scan();
+  Object.assign(f.store.data.tasks[0]!, { phase: "commented", analysis: "Heapsort or Timsort? Please choose before I start.", commentID: 10 });
+  d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.ok(!f.events.includes("prepare"));
+});
+
+test("invalid analysis decisions never post or start implementation", async () => {
+  const f = fixture();
+  f.executor.analyze = async () => ({ kind: "proceed", comment: "Plan", question: "Which one?" }) as any;
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "retry_wait");
+  assert.deepEqual(f.events, []);
+});
+
+test("a new round requires its own clarification and does not reuse a previous answer", async () => {
+  const f = proposalFixture(), d = f.make();
+  await d.init(); await d.scan(); await d.tick();
+  f.addComment("Implement heapsort only. Use branch develop.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "done");
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.addComment("Propose one more algorithm before implementing it.");
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.round, 2); assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.analysisDialogue, undefined);
+  assert.equal(d.status()[0]?.question?.answer, undefined);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+  assert.equal(f.events.filter(e => e === "push").length, 1);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("another issue can proceed while an analysis question remains unanswered", async () => {
+  const f = proposalFixture(), d = f.make();
+  const request = await f.github.issue("owner/repo", 1);
+  f.github.issues = async () => [request, { ...issue, number: 2 }];
+  f.github.issue = async (_repo, number) => number === 1 ? request : { ...issue, number: 2 };
+  const analyze = f.executor.analyze;
+  f.executor.analyze = async task => task.issue.number === 1 ? analyze(task) : { kind: "proceed", comment: "Repair the counter and verify it." };
+  await d.init(); await d.scan(); await d.tick(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting");
+  assert.equal(d.status()[0]?.sessionID, undefined);
+  assert.equal(d.status()[1]?.status, "done");
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
 
 test("routing matches full tags, ignores emails and rejects ambiguous routes", () => {
   assert.deepEqual(matchRoute("(@DEEPSEEK) fix", options.routes), route);

@@ -90,7 +90,7 @@ follow-up round and updates the same open PR.
 
 ## Persistence and reconciliation
 
-The queue stores analysis, comment ID, session ID, phase, pinned base branch,
+The queue stores analysis decisions and clarification dialogue, comment ID, session ID, phase, pinned base branch,
 worktree, base commit, pending questions, replies, permission decisions, helper
 IDs, check results, PR title, publication time, PR, and merge status. Writes are
 atomic; heartbeat locks prevent multiple owners of the same state directory.

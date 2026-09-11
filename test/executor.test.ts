@@ -191,3 +191,37 @@ test("base selection uses the configured model for natural-language requests and
   response = { kind: "branch", branch: "invented", source: 0, quote: "invented" };
   await assert.rejects(executor.selectBase(task(), options.repositories[0]!, [{ text: "Use develop" }]), /not supported/);
 });
+
+test("analysis returns a structured question and reassesses actual clarification replies on the main model", async () => {
+  const question = { kind: "question", comment: "I propose heapsort or Timsort.", question: "Which algorithm should I implement?" };
+  let output = JSON.stringify(question); let prompt = "";
+  const ctx = { generate: { text: async (input: any) => {
+    assert.deepEqual(input.model, route.model); prompt = input.prompt; return { text: output };
+  } } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal);
+  const t = task();
+  t.issue.body = "Add sorting algorithms. Give me proposals before implementing.";
+  assert.deepEqual(await executor.analyze(t), question);
+  assert.ok(prompt.includes(t.issue.body)); assert.match(prompt, /Providing proposals is not permission/);
+  t.analysis = "Previously asked which algorithm to implement.";
+  t.analysisDialogue = [{ question: question.question, answer: { id: 20, body: "Implement heapsort only", user: { login: "alice" } } }];
+  output = JSON.stringify({ kind: "proceed", comment: "Implement heapsort only and verify it." });
+  assert.equal((await executor.analyze(t)).kind, "proceed");
+  assert.ok(prompt.includes(t.analysis)); assert.ok(prompt.includes('"id":20')); assert.ok(prompt.includes("Implement heapsort only"));
+  for (const invalid of ["", "Which algorithm do you want?", "{}", JSON.stringify({ kind: "proceed", comment: "Ready", question: "Pick one?" }), JSON.stringify({ kind: "question", comment: "Options" }), JSON.stringify({ kind: "proceed", comment: " " })]) {
+    output = invalid; await assert.rejects(executor.analyze(t));
+  }
+});
+
+test("the initial coding prompt preserves the confirmed choice and never treats publishing proposals as approval", async () => {
+  const t = task(); let prompt = "";
+  t.analysisDialogue = [{ question: "Heapsort or Timsort?", answer: { id: 20, body: "Heapsort only, with integer input", user: { login: "alice" } } }];
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" }, outcome: "succeeded" }),
+    prompt: async (input: any) => { prompt = input.text; }, wait: async () => {},
+    context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+  } } as unknown as Plugin.Context;
+  await new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {}).run(t, async p => { Object.assign(t, p); });
+  assert.match(prompt, /Heapsort only, with integer input/);
+  assert.match(prompt, /publishing proposals alone is never approval/i);
+});
