@@ -25,6 +25,9 @@ The package is installed from source; publishing to npm is unnecessary.
 
 Run these steps on the machine that will run OpenCode 2. You do not need a target
 project yet. `$HOME` expands to your user's absolute home directory.
+To test the new features on a fresh machine, use the feature-branch clone command
+under [feature-branch testing](#switch-to-the-feature-branch-for-testing) instead
+of step 1 below.
 
 1. Clone and build the plugin:
 
@@ -66,8 +69,9 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    node "$HOME/opencode2-github-automation/dist/setup.js" init
    ```
 
-   Each prompt shows a default in brackets. Press Enter to accept it or type
-   another value. The wizard asks for the main model and capabilities, a vision
+   Prompts with defaults show them in brackets. Press Enter to accept a default
+   or type another value; prompts marked `(required)` need an answer.
+   The wizard asks for the main model and capabilities, a vision
    helper if needed, base branch, trigger, signature, allowed authors,
    polling interval, automatic merging, merge method, and test command.
    Do not add `--local`.
@@ -81,6 +85,15 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    vision helper. Base branch defaults to the GitHub repository's default.
    Enter accepts detected tests; type `skip` to disable them. Complex test commands
    can be entered as JSON argument arrays, e.g. `["npm", "run", "test:unit"]`.
+
+   Model questions in the interactive wizard:
+
+   | Question | What to enter |
+   | --- | --- |
+   | `OpenCode 2 model (provider/model)` | Accept the detected model, or enter an installed model ID. Required if detection fails. |
+   | `Main model capabilities (comma-separated: text,vision,audio)` | Defaults to `text`. Enter `text,vision` if the main model supports images. |
+   | `Vision helper model (provider/model)` | Asked when the main model lacks vision. Enter an installed vision model ID; there is no default. |
+   | `Helper model capabilities` | Defaults to `text,vision`; add `audio` only if supported. Asked after the vision helper model. |
 
 2. Review `/absolute/path/to/your-project/.opencode/automation.json`.
    To allow a colleague to request work, add their GitHub login to `authors`:
@@ -158,7 +171,17 @@ uninstalling, use the name of the directory you originally created.
 
 ### Switch to the feature branch for testing
 
-Replace update step 1 with:
+For a **fresh installation**, replace install step 1 with:
+
+```bash
+git clone --branch codex/issue-dialogue-capabilities https://github.com/d3cker/opencode2-github-automation.git "$HOME/opencode2-github-automation"
+cd "$HOME/opencode2-github-automation"
+npm ci && npm run build
+```
+
+Then complete install steps 2 and 3, and configure a project when ready.
+
+For an **existing installation**, replace update step 1 with:
 
 ```bash
 cd "$HOME/opencode2-github-automation"
