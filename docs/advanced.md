@@ -32,6 +32,9 @@ OpenCode service must be running for polling to work.
 | `allowedAuthors` | GitHub users authorized to request work and approve merging. Merging also requires repository write access. |
 | `checks` | Arrays of executable arguments, e.g. `[["npm", "test"]]`. `[]` skips automated tests and reports that in the PR. No implicit shell. |
 | `routes` | Maps full mentions to agents and models available in OpenCode. |
+| `routes[tag].capabilities` | Main model capabilities: `text`, `vision`, `audio`; omitted means text only. |
+| `routes[tag].mediaModel` | `{ model: { providerID, id }, capabilities: ["text", "vision"] }` for the media helper. |
+| `systemPromptFile` | Markdown instructions appended to bundled `prompts/bot.md`; resolved from `ownerDirectory`. |
 | `signature` | Message footer; defaults to the authenticated GitHub login followed by `[OpenCode2]`. |
 | `autoMerge` | `enabled`, `method`, and exact approval `comments`; see README. |
 | `workerEverySeconds` | Worker tick interval, default 5 seconds. |
@@ -44,9 +47,17 @@ OpenCode service must be running for polling to work.
 Other plugins can expose idempotent RPC methods for custom scheduler jobs. A
 transport timeout does not prove the server never executed a request.
 
-The executor uses the configured OpenCode permissions. The plugin does not answer
-permission prompts automatically. Install project dependencies before running it
-or include suitable setup commands in your checks.
+The executor uses the configured OpenCode permissions. Interactive permission
+requests are posted to the issue and suspend the task. An authorized author must
+reply with the exact `/allow QUESTION_ID` or `/deny QUESTION_ID` command. Explicit
+OpenCode deny rules remain. Install project dependencies before running it or
+include suitable setup commands in your checks.
+
+The executor installs an `automation.runtime` loader in each bot worktree before
+creating its session. This enables question routing, the media tool, and system
+context hooks even outside the owner's checkout. The loader imports the installed
+plugin code and is excluded through Git's local `info/exclude`. Tracked or
+customized files at that path cause an error instead of being replaced.
 
 ## Operations
 
@@ -79,13 +90,15 @@ follow-up round and updates the same open PR.
 
 ## Persistence and reconciliation
 
-The queue stores analysis, comment ID, session ID, phase, branch, worktree, base
-commit, check results, PR title, publication time, PR, and merge status. Writes are
+The queue stores analysis, comment ID, session ID, phase, pinned base branch,
+worktree, base commit, pending questions, replies, permission decisions, helper
+IDs, check results, PR title, publication time, PR, and merge status. Writes are
 atomic; heartbeat locks prevent multiple owners of the same state directory.
 
 After a crash, allow 30 seconds for an abandoned lock to expire. Do not remove
 active locks or queues. Publication reconciles existing comments and PRs after
-uncertain network results. Uncertain prompt delivery is not automatically resent.
+uncertain network results. Uncertain initial prompt delivery is not automatically
+resent. Issue replies and helper prompts use deterministic IDs for admission retries.
 Merge requests pin the verified head SHA and reconcile an already-merged PR.
 
 Only one issue executes at a time. Checks must succeed before publication. Push

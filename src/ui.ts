@@ -16,7 +16,7 @@ export function setupUI(context: Plugin.Context) {
     if ((states.get(activity.key)?.round ?? 0) > activity.round) return;
     states.set(activity.key, activity);
     const started = activity.sessionReady && activity.sessionID && ["ready", "retry_wait"].includes(activity.status);
-    const terminal = ["done", "blocked", "failed"].includes(activity.status);
+    const terminal = ["done", "blocked", "failed", "waiting"].includes(activity.status);
     const id = `${activity.key}:${activity.round}:${started ? "started" : activity.status}`;
     if ((!started && !terminal) || seen.has(id)) return;
     seen.add(id);
@@ -25,7 +25,7 @@ export function setupUI(context: Plugin.Context) {
       const opened = context.ui.tabs.open(activity.sessionID!); // The SDK explicitly opens this in the background.
       context.ui.toast.show({ title: "OpenCode Automation", message: `Working on ${activity.key}. ${opened ? "Session in a tab · " : "Open session: "}/bot`, variant: "info", duration: 8000 });
     } else {
-      context.ui.toast.show({ title: "OpenCode Automation", message: `${activity.key}: ${activity.status === "done" ? "done — PR updated" : "needs attention"}. /bot`, variant: activity.status === "done" ? "success" : "warning", duration: 8000 });
+      context.ui.toast.show({ title: "OpenCode Automation", message: `${activity.key}: ${activity.status === "done" ? "done — PR updated" : activity.status === "waiting" ? "waiting for a reply in the GitHub issue" : "needs attention"}. /bot`, variant: activity.status === "done" ? "success" : "warning", duration: 8000 });
     }
   };
   const sync = async (initial = false) => {

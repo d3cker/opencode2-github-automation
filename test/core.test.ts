@@ -286,3 +286,66 @@ test("auto-merge can be disabled independently of issue processing", async () =>
   const d = new Dispatcher({ ...options, autoMerge: { ...options.autoMerge, enabled: false } }, f.store, f.github, f.executor, new AbortController().signal);
   await d.init(); await d.scan(); await d.tick(); await d.tick(); assert.equal(called, false); assert.equal(d.status()[0]?.status, "done");
 });
+
+test("issue questions are published once, survive restart, and resume only on an authorized reply", async () => {
+  const f = fixture(); let d = f.make();
+  f.github.ensureComment = async (_repo, _number, marker) => { f.events.push(marker.includes(":question:") ? "question" : "comment"); return marker.includes(":question:") ? 100 : 42; };
+  f.executor.run = async (task, checkpoint) => {
+    await checkpoint({ sessionID: "ses_test", promptAttempted: true });
+    if (!task.question) { await d.question("ses_test", "q1", "Which color?"); await d.question("ses_test", "q1", "Which color?"); }
+    else if (task.question.answer) await checkpoint({ question: { ...task.question, delivered: true, answerSent: true } });
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.ok(!f.events.includes("verify"));
+  assert.equal(f.events.filter(e => e === "question").length, 1);
+  d = f.make(); await d.init();
+  f.github.comments = async () => [{ id: 101, body: "red", user: { login: "stranger" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]?.status, "waiting");
+  f.github.comments = async () => [{ id: 102, body: "blue", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.question?.answer?.body, "blue");
+  await d.tick(); assert.equal(d.status()[0]?.status, "done");
+  assert.deepEqual(d.status()[0]?.pendingFeedback, []);
+});
+test("permission replies require an explicit question-scoped allow or deny", async () => {
+  const f = fixture(); const d = f.make();
+  f.github.ensureComment = async (_r, _n, marker) => marker.includes(":question:") ? 100 : 42;
+  f.executor.run = async (_t, checkpoint) => { await checkpoint({ sessionID: "ses_test" }); await d.question("ses_test", "p1", "May I run this command?", { action: "bash", resources: ["npm test"] }); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.comments = async () => [{ id: 101, body: "sure", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.question?.answer, undefined);
+  f.github.comments = async () => [{ id: 102, body: "/allow p1", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.permissions?.[0]?.allow, true);
+});
+test("an authorized base directive pins both worktree creation and PR target", async () => {
+  const f = fixture(); const branchIssue = { ...issue, body: `${issue.body}\n/base release/next` };
+  f.github.issues = async () => [branchIssue]; f.github.issue = async () => branchIssue;
+  let prepared = "", published = "";
+  f.executor.prepare = async (_t, repo) => { prepared = repo.baseBranch; return { worktree: "/worktree", baseSha: "base" }; };
+  f.github.ensurePull = async (_r, _h, base) => { published = base; return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(prepared, "release/next"); assert.equal(published, "release/next"); assert.equal(d.status()[0]?.baseBranch, "release/next");
+});
+
+test("concurrent questions share one post and recover a lost publication response", async () => {
+  const f = fixture(); let d = f.make(), posts = 0;
+  f.github.ensureComment = async (_r, _n, marker) => {
+    if (!marker.includes(":question:")) return 42;
+    posts++;
+    // Keep the simulated request in flight while both tool calls enter.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (posts === 1) throw new Error("Comment delivery unknown");
+    return 100;
+  };
+  f.executor.run = async (_task, checkpoint) => {
+    await checkpoint({ sessionID: "ses_test" });
+    await Promise.allSettled([d.question("ses_test", "q1", "Which option?"), d.question("ses_test", "q2", "Duplicate parallel request")]);
+  };
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.status, "waiting"); assert.equal(posts, 1);
+  assert.equal(d.status()[0]?.question?.commentID, undefined);
+  d = f.make(); await d.init(); await d.tick();
+  assert.equal(posts, 2); assert.equal(d.status()[0]?.question?.commentID, 100);
+  f.github.comments = async () => [{ id: 101, body: "The second option", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]?.status, "ready");
+  assert.equal(d.status()[0]?.question?.answer?.id, 101);
+});

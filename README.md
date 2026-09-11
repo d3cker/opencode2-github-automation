@@ -67,7 +67,8 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    ```
 
    Each prompt shows a default in brackets. Press Enter to accept it or type
-   another value. The wizard asks for model, trigger, signature, allowed authors,
+   another value. The wizard asks for the main model and capabilities, a vision
+   helper if needed, base branch, trigger, signature, allowed authors,
    polling interval, automatic merging, merge method, and test command.
    Do not add `--local`.
 
@@ -75,6 +76,9 @@ Authenticate first with `gh auth login` and `gh auth setup-git` if needed.
    `[OpenCode2]`, your GitHub login as the allowed author, 60 seconds, automatic
    merging enabled, squash, and detected tests (or `skip` if none are found).
    If no model can be detected from the running service, enter `provider/model`.
+   Capabilities default to `text`; add `vision` or `audio` only if the model
+   supports those inputs. A text-only model requires another model for the
+   vision helper. Base branch defaults to the GitHub repository's default.
    Enter accepts detected tests; type `skip` to disable them. Complex test commands
    can be entered as JSON argument arrays, e.g. `["npm", "run", "test:unit"]`.
 
@@ -137,15 +141,16 @@ to finish first.
    ```
 
 Reopen the terminal client if the update changes the UI. Project configuration
-and queues remain in place. Do not repeat global registration or run `init` again.
+and queues remain in place. Load each owner project again after a service restart
+to resume its polling. Do not repeat global registration or run `init` again.
 
 ### Changes in this version
 
-The default trigger is now `@opencodebot`. Existing explicit `trigger`, `signature`,
-and `authors` settings are preserved. If an older configuration omitted `trigger`,
-set it explicitly before upgrading to retain the old mention (for example,
-`"trigger": "@your-existing-bot"`). The built-in merge phrases are now English;
-custom phrases can still be configured in any language.
+Questions and permission requests now wait for replies in the GitHub issue.
+You can choose the base branch, configure a vision/audio helper, and add bot
+instructions in Markdown. Existing JSON files still work: omitted capabilities
+mean `text`, and no media helper is assumed. Add the fields below to enable it.
+Keep your existing `trigger`, `signature`, and `authors` settings.
 
 Existing global loader directories may be named `d3ckerbot`. Keep those loaders
 when updating; do not register a second copy under `opencode-automation`. When
@@ -158,12 +163,12 @@ Replace update step 1 with:
 ```bash
 cd "$HOME/opencode2-github-automation"
 git fetch origin
-git switch codex/english-setup-defaults
+git switch codex/issue-dialogue-capabilities
 git pull --ff-only
 ```
 
-Then complete update steps 2 and 3. The approval and signature features described
-below are available on this branch (`0.4.0-beta.2`).
+Then complete update steps 2 and 3 (`0.5.0-beta.1`). Reopen each project you want
+the restarted service to handle.
 
 ## 4. Remove automation from one project
 
@@ -263,6 +268,10 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 
 | Field | Purpose |
 | --- | --- |
+| `baseBranch` | Base for new worktrees and PRs; defaults to the GitHub default branch. |
+| `capabilities` | Main model support: `text`, `vision`, `audio`; defaults to `["text"]`. |
+| `mediaModel` | Separate helper model and its capabilities; example below. |
+| `systemPromptFile` | Optional Markdown instructions appended to the bundled bot prompt; path relative to the primary checkout, or absolute. |
 | `trigger` | Mention that starts work; defaults to `@opencodebot`. |
 | `everySeconds` | Polling interval; defaults to 60 seconds. |
 | `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
@@ -281,6 +290,44 @@ Provide the model and a test command (or explicitly skip tests):
 cd /absolute/path/to/your-project
 node "$HOME/opencode2-github-automation/dist/setup.js" init --model provider/model --skip-tests --yes
 ```
+
+Optional flags: `--base-branch develop`, `--capabilities text`,
+`--media-model provider/vision-model`, `--media-capabilities text,vision`,
+`--system-prompt .opencode/bot.md`. With `--yes`, supply a helper explicitly
+if you want media support with a text-only main model.
+
+## Questions, branches, media, and bot instructions
+
+- **Questions:** reply in the issue as an account in `authors`; no repeated
+  mention is needed. The bot enters `waiting` and resumes after the next scan.
+  Permission questions require the exact `/allow QUESTION_ID` or
+  `/deny QUESTION_ID` shown in the comment. Explicit OpenCode deny rules remain.
+- **Base branch:** set `baseBranch` in the JSON, or put `/base release/next`
+  on its own line in the initial issue request. The branch must exist on `origin`.
+  The worktree and PR use that base. Existing tasks keep their pinned base.
+- **Media:** declare actual model capabilities and a helper if needed:
+
+  ```json
+  {
+    "model": "provider/text-model",
+    "capabilities": ["text"],
+    "mediaModel": {
+      "model": "provider/vision-model",
+      "capabilities": ["text", "vision"]
+    }
+  }
+  ```
+
+  Add these fields to your existing JSON using your installed model IDs. The
+  helper analyzes attachments in a separate session; the main model stays
+  unchanged. Add `audio` if the helper also accepts audio files.
+- **Instructions:** [prompts/bot.md](prompts/bot.md) is bundled and always loaded.
+  For project-specific instructions, create `.opencode/bot.md` in the primary
+  checkout and set `"systemPromptFile": ".opencode/bot.md"`. It is appended
+  to the baseline and reread on each use, including from worker branches.
+
+See [runtime behavior and examples](docs/runtime.md) for reply handling, branch
+selection, supported media inputs, and prompt persistence.
 
 ## Automatic merge and message signatures
 

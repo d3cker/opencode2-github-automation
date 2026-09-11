@@ -43,7 +43,7 @@ test("interactive CLI saves account-derived defaults and displays English prompt
     const mock = join(dir, "interactive-mock.mjs");
     await writeFile(mock, 'Object.defineProperty(process.stdin,"isTTY",{value:true});globalThis.fetch=async url=>{if(!String(url).startsWith("https://api.github.com/"))throw new Error("Unexpected network request");return Response.json(String(url).endsWith("/user")?{login:"alice"}:{default_branch:"main"})};');
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--import", mock, fileURLToPath(new URL("../src/setup.ts", import.meta.url)), "init", "--model", "provider/model"], { cwd: dir, env: { ...process.env, GITHUB_TOKEN: "fixture-secret" }, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--import", mock, fileURLToPath(new URL("../src/setup.ts", import.meta.url)), "init", "--model", "provider/model", "--capabilities", "text,vision", "--base-branch", "main"], { cwd: dir, env: { ...process.env, GITHUB_TOKEN: "fixture-secret" }, stdio: ["pipe", "pipe", "pipe"] });
       let output = "", error = "", pending = "";
       const timer = setTimeout(() => { child.kill(); reject(new Error("Wizard timed out")); }, 15000);
       child.stdout.on("data", chunk => {

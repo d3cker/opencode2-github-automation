@@ -19,7 +19,12 @@
         "routes": {
           "@opencodebot": {
             "agent": "build",
-            "model": { "providerID": "YOUR_PROVIDER_ID", "id": "YOUR_MODEL_ID" }
+            "model": { "providerID": "YOUR_PROVIDER_ID", "id": "YOUR_MODEL_ID" },
+            "capabilities": ["text"],
+            "mediaModel": {
+              "model": { "providerID": "YOUR_PROVIDER_ID", "id": "YOUR_VISION_MODEL_ID" },
+              "capabilities": ["text", "vision"]
+            }
           }
         },
         "workerEverySeconds": 5,

@@ -27,6 +27,7 @@ async function main() {
     return;
   }
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
+    "base-branch": { type: "string" }, capabilities: { type: "string" }, "media-model": { type: "string" }, "media-capabilities": { type: "string" }, "system-prompt": { type: "string" },
     signature: { type: "string" }, authors: { type: "string", multiple: true },
     model: { type: "string" }, check: { type: "string", multiple: true }, trigger: { type: "string" },
     "skip-tests": { type: "boolean", default: false },
@@ -34,7 +35,7 @@ async function main() {
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\nRun inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\nRun inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());
@@ -42,7 +43,13 @@ async function main() {
   if (values["skip-tests"] && values.check) throw new Error("Choose --check or --skip-tests.");
   const detected = await detectCheck(root);
   const check = values["skip-tests"] ? false : values.check ?? detected;
-  let settings: unknown = { model: values.model, ...(values.trigger ? { trigger: values.trigger } : {}),
+  const extensions = {
+    ...(values["base-branch"] ? { baseBranch: values["base-branch"] } : {}),
+    ...(values.capabilities ? { capabilities: values.capabilities.split(",").map(s => s.trim()) as ("text" | "vision" | "audio")[] } : {}),
+    ...(values["media-model"] ? { mediaModel: { model: values["media-model"], capabilities: (values["media-capabilities"] ?? "text,vision").split(",").map(s => s.trim()) as ("text" | "vision" | "audio")[] } } : {}),
+    ...(values["system-prompt"] ? { systemPromptFile: values["system-prompt"] } : {}),
+  };
+  let settings: unknown = { ...extensions, model: values.model, ...(values.trigger ? { trigger: values.trigger } : {}),
     ...(values.signature ? { signature: values.signature } : {}), ...(values.authors ? { authors: values.authors } : {}),
     ...(check === false || values.check || !detected ? { check } : {}) };
   // Refuse an existing configuration before making requests or asking questions.
@@ -68,9 +75,10 @@ async function main() {
     const prompt = createInterface({ input: stdin, output: stdout });
     try {
       settings = await configure(message => prompt.question(message), { login, model: defaultModel, check: detected }, {
-        model: values.model, trigger: values.trigger, signature: values.signature, authors: values.authors,
+        ...extensions, model: values.model, trigger: values.trigger, signature: values.signature, authors: values.authors,
         check: values["skip-tests"] ? false : values.check,
       });
+      if (values["system-prompt"]) settings = { ...settings as object, systemPromptFile: values["system-prompt"] };
     } finally { prompt.close(); }
   } else if (!values.model || check === undefined) {
     throw new Error("Pass --model provider/model and --check or --skip-tests when no tests are detected.");
