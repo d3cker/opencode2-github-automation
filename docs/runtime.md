@@ -45,6 +45,20 @@ The queue retains waiting questions and accepted replies across restarts.
 After restarting the service, load the owner project again to resume polling.
 No terminal UI is needed to answer in GitHub.
 
+## Tabs after PR closure
+
+Each repository scan checks the state of tracked PRs independently of the
+auto-merge setting and whether their issues are still open. A manual close,
+manual merge, or automatic merge sends the closed PR state to connected TUIs.
+Missed events are recovered by the TUI's activity polling, including on startup.
+
+The TUI closes only tabs associated with that task's known main sessions and
+media helpers. Busy tabs wait until idle. Closing a tab never deletes a session,
+interrupts work, or removes a worktree. A tab reopened through `/bot` or history
+is not repeatedly closed by later polls in the same TUI instance. Sessions from
+new rounds are recorded in the queue; for older queues, cleanup can include only
+the session IDs still present in saved state or observed by the current TUI.
+
 ## Base branches
 
 Write your preference in the issue or an authorized comment in ordinary language:

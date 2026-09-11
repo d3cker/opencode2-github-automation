@@ -12,7 +12,8 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
 - **Executor:** generates an acknowledgement, runs an OpenCode session in an
   isolated Git worktree, verifies changes, and pushes the verified commit.
 - **Terminal UI:** subscribes to activity events and polls for missed updates.
-  Opens background tabs and exposes the `/bot` task selector.
+  Opens background tabs, closes task tabs after PR closure while retaining
+  session history, and exposes the `/bot` task selector.
 
 ## Workflow
 

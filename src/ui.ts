@@ -8,6 +8,8 @@ export function setupUI(context: Plugin.Context) {
   const rpc = context.client.rpc(GithubRpc);
   const states = new Map<string, Activity>();
   const seen = new Set<string>();
+  const sessions = new Map<string, Set<string>>();
+  const closed = new Map<string, Set<string>>();
   let stopped = false, syncing = false;
   const controller = new AbortController();
   const receive = (raw: unknown, initial = false) => {
@@ -15,6 +17,27 @@ export function setupUI(context: Plugin.Context) {
     const activity = Activity.parse(raw);
     if ((states.get(activity.key)?.round ?? 0) > activity.round) return;
     states.set(activity.key, activity);
+    const known = sessions.get(activity.key) ?? new Set<string>();
+    for (const id of [...(activity.sessionIDs ?? []), ...(activity.sessionID ? [activity.sessionID] : [])]) known.add(id);
+    sessions.set(activity.key, known);
+    if (activity.prState === "closed" || activity.phase === "merged") {
+      // Closing a tab preserves its session. Handle each tab once so a person
+      // can reopen it from /bot or history without the next poll closing it.
+      seen.add(`${activity.key}:${activity.round}:started`);
+      if (context.ui.tabs.enabled()) {
+        const handled = closed.get(activity.key) ?? new Set<string>();
+        const tabs = context.ui.tabs.list();
+        for (const id of known) {
+          if (handled.has(id)) continue;
+          const tab = tabs.find(t => t.sessionID === id);
+          if (tab?.busy) continue; // Retry after ongoing work finishes.
+          if (!tab || context.ui.tabs.close(id)) handled.add(id);
+        }
+        closed.set(activity.key, handled);
+      }
+      return;
+    }
+    if (activity.prState === "open") closed.delete(activity.key);
     const started = activity.sessionReady && activity.sessionID && ["ready", "retry_wait"].includes(activity.status);
     const terminal = ["done", "blocked", "failed", "waiting"].includes(activity.status);
     const id = `${activity.key}:${activity.round}:${started ? "started" : activity.status}`;

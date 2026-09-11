@@ -5,8 +5,10 @@ import { setupUI } from "../src/ui.js";
 import type { Activity } from "../src/activity.js";
 
 const activity: Activity = { key: "owner/repo#1", repo: "owner/repo", issueNumber: 1, round: 1, phase: "running", status: "ready", sessionID: "ses_test", sessionReady: true, worktree: "/worktree" };
-function fixture(initial: Activity[] = []) {
-  const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [];
+function fixture(initial: Activity[] = [], restored: string[] = []) {
+  const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [], closed: string[] = [];
+  const tabs = new Map(restored.map(sessionID => [sessionID, { sessionID, busy: false }]));
+  let enabled = true;
   let listener!: (event: { location: { directory: string }; data: Activity }) => void;
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
@@ -17,13 +19,17 @@ function fixture(initial: Activity[] = []) {
     ui: {
       slot: (claim: { render: () => unknown }) => { claim.render(); return () => {}; },
       toast: { show: (value: unknown) => toasts.push(value) },
-      tabs: { open: (id: string) => { opened.push(id); return true; }, focus: () => false },
+      tabs: {
+        enabled: () => enabled, list: () => [...tabs.values()],
+        open: (id: string) => { if (!enabled) return false; opened.push(id); tabs.set(id, { sessionID: id, busy: false }); return true; }, focus: () => false,
+        close: (id: string) => { assert.equal(typeof id, "string"); if (!tabs.delete(id)) return false; closed.push(id); return true; },
+      },
       router: { navigate: (value: unknown) => navigated.push(value) },
       dialog: { select: async () => activity.key, alert: async () => {} },
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { toasts, opened, navigated, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -53,4 +59,53 @@ test("activity payloads contain JSON values only, including tasks with missing o
   const { activityOf } = await import("../src/activity.js");
   const row = activityOf({ key: "owner/repo#1", repo: "owner/repo", issue: { number: 1 }, phase: "queued", status: "ready" } as import("../src/dispatcher.js").Task);
   assert.deepEqual(row, JSON.parse(JSON.stringify(row)));
+});
+
+for (const phase of ["pr_closed", "merged"]) {
+  test(`${phase} closes related tabs once and leaves unrelated sessions available`, async () => {
+    const f = fixture([], ["ses_unrelated"]);
+    try {
+      f.event(activity);
+      f.event({ ...activity, status: "done", phase: "pr_opened", prState: "open" });
+      assert.deepEqual(f.closed, []); // Opening a PR is not completion of its review.
+      const final = { ...activity, status: "done", phase, prState: "closed" };
+      f.event(final); f.event(final);
+      assert.deepEqual(f.closed, ["ses_test"]); assert.ok(f.tabs.has("ses_unrelated"));
+      f.tabs.set("ses_test", { sessionID: "ses_test", busy: false }); // Manually reopened from history.
+      f.event(final); assert.equal(f.closed.length, 1); assert.ok(f.tabs.has("ses_test"));
+      await f.command(); assert.deepEqual(f.navigated.at(-1), { type: "session", sessionID: "ses_test" });
+    } finally { f.stop(); }
+  });
+}
+
+test("a closure snapshot closes restored tabs from earlier rounds and helpers without replaying old notifications", async () => {
+  const snapshot = { ...activity, round: 3, status: "done", phase: "pr_closed", prState: "closed", sessionIDs: ["ses_old", "ses_test", "ses_vision"] };
+  const f = fixture([snapshot], ["ses_old", "ses_test", "ses_vision", "ses_unrelated"]);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.closed, ["ses_old", "ses_test", "ses_vision"]);
+    assert.equal(f.toasts.length, 0); assert.ok(f.tabs.has("ses_unrelated"));
+    f.event({ ...activity, round: 3 }); // A late start notification must not reopen it.
+    assert.deepEqual(f.opened, []);
+  } finally { f.stop(); }
+});
+
+test("busy tabs remain open until idle and disabled tabs do not prevent later cleanup", async () => {
+  const f = fixture();
+  const final = { ...activity, status: "done", phase: "pr_closed", prState: "closed" };
+  try {
+    f.event(activity); f.tabs.get("ses_test")!.busy = true;
+    f.event(final); assert.deepEqual(f.closed, []);
+    f.tabs.get("ses_test")!.busy = false;
+    f.enableTabs(false); f.event(final); assert.deepEqual(f.closed, []);
+    f.enableTabs(true); f.event(final); assert.deepEqual(f.closed, ["ses_test"]);
+    f.event(final, "/other"); assert.equal(f.closed.length, 1);
+  } finally { f.stop(); }
+});
+
+test("activity includes saved main sessions, previous sessions and media helpers for closure", async () => {
+  const { activityOf } = await import("../src/activity.js");
+  const row = activityOf({ key: "owner/repo#1", repo: "owner/repo", issue: { number: 1 }, phase: "pr_opened", status: "done", sessionID: "ses_current", previousSessionID: "ses_previous", sessionIDs: ["ses_old", "ses_previous", "ses_current"], helpers: [{ id: "ses_vision" }], pr: { state: "closed", html_url: "https://github.com/owner/repo/pull/2" } } as import("../src/dispatcher.js").Task);
+  assert.deepEqual(row.sessionIDs, ["ses_old", "ses_previous", "ses_current", "ses_vision"]);
+  assert.equal(row.phase, "pr_closed"); assert.equal(row.prState, "closed");
 });

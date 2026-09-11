@@ -24,6 +24,7 @@ export const Task = z.object({
   helpers: z.array(z.object({ id: z.string(), parentID: z.string(), capability: z.enum(["vision", "audio"]) })).optional(),
   branch: z.string(), worktree: z.string().optional(), baseSha: z.string().optional(),
   sessionID: z.string().optional(), promptAttempted: z.boolean().optional(),
+  sessionIDs: z.array(z.string()).optional(),
   sessionReady: z.boolean().optional(), round: z.number().int().positive().optional(),
   source: z.enum(["issue", "comment"]).optional(),
   feedback: z.array(Comment).optional(), pendingFeedback: z.array(Comment).optional(), commentCursor: z.number().optional(),
@@ -46,6 +47,7 @@ export interface GithubPort {
   comments(repo: string, number: number): Promise<Comment[]>;
   ensureComment(repo: string, number: number, marker: string, body: string): Promise<number>;
   findPull(repo: string, branch: string): Promise<Pull | undefined>;
+  pull(repo: string, number: number): Promise<Pull>;
   ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull>;
 }
 export interface Executor {
@@ -76,6 +78,8 @@ export class Dispatcher {
     let announce = false;
     await this.serial.run(async () => {
       announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed", "waiting"].includes(patch.status));
+      announce ||= patch.pr?.state === "closed" && task.pr?.state !== "closed";
+      if (patch.sessionID) task.sessionIDs = [...new Set([...task.sessionIDs ?? [], ...[task.previousSessionID, task.sessionID, patch.sessionID].filter((id): id is string => Boolean(id))])];
       Object.assign(task, patch);
       await this.store.save(this.queue);
     });
@@ -89,6 +93,13 @@ export class Dispatcher {
   private async scanOnce() {
     let queued = 0, ignored = 0;
     for (const repo of this.options.repositories) {
+      // Watch PR state independently of automatic merging, issue state, and
+      // worker progress so manual closure/merge also reaches attached TUIs.
+      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && t.pr && !t.merged)) {
+        const pr = await this.github.pull(repo.repo, task.pr!.number);
+        const merged = pr.merged === true || Boolean(pr.merged_at);
+        if (pr.state !== task.pr!.state || merged) await this.update(task, { pr, ...(merged ? { merged: true } : {}) });
+      }
       const issues = await this.github.issues(repo.repo);
       for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo)) {
         if (!issues.some(i => i.number === tracked.issue.number)) issues.push(await this.github.issue(repo.repo, tracked.issue.number));
@@ -301,14 +312,14 @@ export class Dispatcher {
   private async mergeOnce() {
     if (!this.options.autoMerge.enabled || !this.github.mergeApproved) return;
     for (const task of this.queue.tasks) {
-      if (task.status !== "done" || !task.pr || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
+      if (task.status !== "done" || !task.pr || task.pr.state === "closed" || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
       const repo = this.options.repositories.find(r => r.repo === task.repo);
       if (!repo) continue;
       // Older queues start watching now; historical approvals must not trigger an unexpected merge.
       if (!task.publishedAt) { await this.update(task, { publishedAt: this.now() }); continue; }
       try {
         await this.scan(); // Pick up issue feedback before considering a completed task for merge.
-        if (task.pendingFeedback?.length) continue;
+        if (task.pendingFeedback?.length || task.pr.state === "closed") continue;
         const merged = await this.github.mergeApproved(task.repo, task.pr.number, task.commit, task.publishedAt, repo.allowedAuthors, this.options.autoMerge);
         if (merged) {
           await this.github.ensureComment(task.repo, task.pr.number, `<!-- opencode2:${task.key}:merged -->`, "Pull request merged.");

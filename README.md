@@ -196,7 +196,7 @@ git switch codex/issue-dialogue-capabilities
 git pull --ff-only
 ```
 
-Then complete update steps 2 and 3 (`0.5.0-beta.3`). Reopen each project you want
+Then complete update steps 2 and 3 (`0.5.0-beta.4`). Reopen each project you want
 the restarted service to handle.
 
 ## 4. Remove automation from one project
@@ -411,6 +411,14 @@ Set `"autoMerge": { "enabled": false }` to disable automatic merging.
 
 Starting a session shows a notification and opens a background tab when tabs
 are enabled. Use `/bot` to list tasks and open a session.
+
+Closing or merging the PR automatically closes its known bot session tabs,
+including earlier rounds and media helpers. This also works for manual GitHub
+actions with `autoMerge` disabled. Closure is detected on the next repository
+scan; connected TUIs also refresh every 10 seconds. Busy tabs wait until their
+work finishes. Session history is preserved, and `/bot` can reopen a session.
+Reopening it manually keeps it open for the current TUI instance. No additional
+configuration is required.
 
 A new comment from an authorized author on a tracked issue starts another round:
 acknowledgement, implementation, and a push to the same open PR. The mention does

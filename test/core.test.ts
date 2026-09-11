@@ -27,6 +27,7 @@ function fixture() {
     issues: async () => [structuredClone(issue)], issue: async () => structuredClone(issue),
     ensureComment: async () => { events.push("comment"); return 42; },
     findPull: async () => undefined,
+    pull: async (_repo, number) => ({ number, html_url: `https://github.com/owner/repo/pull/${number}`, state: "open" }),
     ensurePull: async () => { events.push("pr"); return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; },
   };
   const executor: Executor = {
@@ -473,6 +474,58 @@ test("auto-merge can be disabled independently of issue processing", async () =>
   const f = fixture(); let called = false; f.github.mergeApproved = async () => { called = true; return true; };
   const d = new Dispatcher({ ...options, autoMerge: { ...options.autoMerge, enabled: false } }, f.store, f.github, f.executor, new AbortController().signal);
   await d.init(); await d.scan(); await d.tick(); await d.tick(); assert.equal(called, false); assert.equal(d.status()[0]?.status, "done");
+});
+
+for (const merged of [false, true]) {
+  test(`scanning detects a manually ${merged ? "merged" : "closed"} PR even with auto-merge disabled and its issue closed`, async () => {
+    const f = fixture(); const notifications: ReturnType<Dispatcher["activity"]>[number][] = [];
+    const config = { ...options, autoMerge: { ...options.autoMerge, enabled: false } };
+    const make = () => new Dispatcher(config, f.store, f.github, f.executor, new AbortController().signal, [], () => 1000, async a => { notifications.push(a); });
+    let d = make(); await d.init(); await d.scan(); await d.tick();
+    f.github.issues = async () => [];
+    f.github.issue = async () => ({ ...issue, state: "closed" });
+    f.github.pull = async (_repo, number) => ({ number, html_url: "https://github.com/owner/repo/pull/2", state: "closed", merged });
+    await d.scan();
+    assert.equal(d.status()[0]?.pr?.state, "closed");
+    assert.equal(d.activity()[0]?.phase, merged ? "merged" : "pr_closed");
+    assert.equal(notifications.filter(a => a.prState === "closed").length, 1);
+    assert.deepEqual(notifications.at(-1)?.sessionIDs, ["ses_test"]);
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    d = make(); await d.init(); await d.scan(); await d.tick();
+    assert.equal(d.activity()[0]?.prState, "closed");
+    assert.equal(notifications.filter(a => a.prState === "closed").length, 1);
+  });
+}
+
+test("a failed PR state lookup does not announce closure or change saved state", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.pull = async () => { throw new Error("GitHub unavailable"); };
+  await assert.rejects(d.scan(), /GitHub unavailable/);
+  assert.equal(d.status()[0]?.pr?.state, "open"); assert.equal(d.activity()[0]?.prState, "open");
+});
+
+test("main session IDs from every follow-up round survive restart for tab cleanup", async () => {
+  const f = fixture(); let session = 0; let d = f.make();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: `ses_${++session}` }); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  for (const id of [50, 60]) {
+    f.github.comments = async () => [{ id, body: "Please handle one more case", user: { login: "alice" } }];
+    await d.scan(); await d.tick();
+  }
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  d = f.make(); await d.init();
+  assert.deepEqual(d.activity()[0]?.sessionIDs, ["ses_1", "ses_2", "ses_3"]);
+});
+
+test("PR state lookup uses the exact PR number and retains merge metadata", async () => {
+  const github = new Github("fake", new AbortController().signal, (async (input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(input), "https://api.github.com/repos/owner/repo/pulls/17");
+    assert.equal(init?.method, "GET");
+    return new Response(JSON.stringify({ number: 17, html_url: "https://github.com/owner/repo/pull/17", state: "closed", merged: true, merged_at: "2026-09-11T20:00:00Z" }));
+  }) as typeof fetch);
+  const pr = await github.pull("owner/repo", 17);
+  assert.equal(pr.state, "closed"); assert.equal(pr.merged, true);
 });
 
 test("issue questions are published once, survive restart, and resume only on an authorized reply", async () => {
