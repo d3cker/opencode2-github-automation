@@ -119,6 +119,23 @@ The package includes `prompts/bot.md`. It is read for analysis, task execution,
 continuations, helpers, and PR-title generation. It is also injected into each
 agent-loop system context, including the next request after compaction.
 
+The bundled prompt scopes instructions to triage, base selection, implementation,
+delegated workers, media helpers, and title generation. Within implementation,
+it asks the agent to inspect the project, use relevant available workflows or
+skills, plan nontrivial work, delegate useful independent subtasks, verify results,
+and review the final diff. Subagents and planning tools must be available in the
+OpenCode environment; the prompt does not install or enable them. Simple tasks
+can stay lightweight, and unavailable delegation falls back to local work.
+
+These steps guide the model inside the existing `running` phase. The executor
+still performs its separate configured verification before publication. There
+are no new persisted planning or review phases, and the dispatcher does not
+enforce a review-completion gate. Writing "blocked" in a final summary does not
+change task status; a need for user input must use `ask_issue`. Follow-up rounds
+start a new main session on the existing worktree, so the prompt tells the agent
+to inspect existing progress rather than assume the earlier session's plan is
+already in context.
+
 To append project instructions, create a Markdown file and set
 `"systemPromptFile": ".opencode/bot.md"`. Relative paths resolve from the owner
 checkout, not the worker branch. Absolute paths are also accepted. The file is
