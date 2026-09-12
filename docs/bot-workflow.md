@@ -201,6 +201,12 @@ sequenceDiagram
 - Runtime context injects bundled bot instructions and optional project prompt
   instructions on each agent loop, including after compaction. A missing or empty
   configured prompt file fails execution.
+- Within `running`, the bundled prompt guides project inspection, planning,
+  use of available workflows and native subagents, implementation, verification,
+  and final review. These are model instructions, not persisted dispatcher
+  phases or enforced review gates. The executor's `verifying` phase remains
+  separate. A prose blocker in the final summary does not set `blocked` status;
+  user-input blockers must go through `ask_issue`.
 - One unresolved question is retained at a time. Runtime hooks remove tools and
   reject non-question tool execution while a question is pending. Native subagent
   questions are attached to the main task; the reply resumes the main session.
