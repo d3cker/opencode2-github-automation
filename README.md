@@ -1,5 +1,7 @@
 # OpenCode 2 GitHub Automation
 
+![OpenCode2 agent executing task](img/banner.png)
+
 A scheduler and GitHub dispatcher in one package, built for **OpenCode 2**.
 
 `@opencodebot` in an issue → acknowledgement → questions if needed → implementation → tests → PR.

@@ -1,11 +1,12 @@
 {
   "name": "opencode2-automation",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Issue-to-PR automation for OpenCode 2 with a scheduler and GitHub dispatcher",
   "main": "./dist/index.js",
   "files": [
     "dist",
     "README.md",
+    "img",
     "docs",
     "prompts",
     "scripts/postinstall.mjs"
