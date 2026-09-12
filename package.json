@@ -6,6 +6,7 @@
   "files": [
     "dist",
     "README.md",
+    "img",
     "docs",
     "prompts",
     "scripts/postinstall.mjs"
