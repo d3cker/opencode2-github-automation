@@ -18,7 +18,7 @@ try {
   const [archive] = JSON.parse(packed.stdout);
   assert.equal(archive.version, pkg.version, "Packed version must match package.json");
   assert.equal(archive.filename, basename(archive.filename), "Archive name must not contain a directory");
-  for (const required of ["dist/index.js", "dist/tui.js", "dist/setup.js", "dist/install.js", "scripts/postinstall.mjs", "prompts/bot.md"]) {
+  for (const required of ["dist/index.js", "dist/tui.js", "dist/setup.js", "dist/install.js", "scripts/postinstall.mjs", "prompts/bot.md", "CHANGELOG.md"]) {
     assert.ok(archive.files.some(file => file.path === required), `Missing packaged file: ${required}`);
   }
   const file = join(output, archive.filename), prefix = join(temporary, "prefix"), config = join(temporary, "config");

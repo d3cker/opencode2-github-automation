@@ -38,6 +38,12 @@ For common investigations:
 - **Why is polling inactive or duplicated?** Read architecture ownership,
   workflow section 1, and installation registration details.
 
+For release changes, read the README's **GitHub Actions and releases** section,
+`CHANGELOG.md`, and `.github/workflows/release.yml`. Every release tag must have
+an exact version section in the changelog. `scripts/release-notes.mjs` extracts
+that section; `scripts/update-release-readme.mjs` maintains the marked installation
+block on the default branch after stable publication. Keep its markers intact.
+
 ## From documentation to source
 
 - `src/index.ts` loads the combined plugin; `src/plugins/` contains the scheduler

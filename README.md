@@ -23,22 +23,28 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 
 ## Install from a .tgz package
 
-1. Download/copy the archive to the machine running OpenCode 2 and install it
-   (replace `VERSION` with the downloaded version):
+Run this command on the machine running OpenCode 2:
 
-   ```bash
-   npm install --global --prefix "$HOME/.local" "$HOME/Downloads/opencode2-automation-VERSION.tgz"
-   ```
+<!-- latest-release:start -->
+Latest stable release: **[v0.6.2](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.2)**.
 
-   `postinstall` registers both the plugin and TUI automatically. No `sudo`,
-   source checkout, or manual config editing is needed. Do not add
-   `--ignore-scripts`; npm needs network access to install dependencies.
+[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz.sha256)
 
-2. Restart the service when its sessions are idle:
+```bash
+npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz"
+```
+<!-- latest-release:end -->
 
-   ```bash
-   opencode2 service restart
-   ```
+`postinstall` registers both the plugin and TUI automatically. No `sudo`,
+source checkout, or manual config editing is needed. Do not add
+`--ignore-scripts`; npm needs network access to install dependencies.
+You can also download the archive and pass its local path to the same command.
+
+Restart the service when its sessions are idle:
+
+```bash
+opencode2 service restart
+```
 
 The CLI is now at `$HOME/.local/bin/opencode2-automation`. If `$HOME/.local/bin`
 is on your PATH, you can use the shorter `opencode2-automation` command.
@@ -122,15 +128,13 @@ A reboot-only task does not handle later `opencode2 service restart` calls.
 
 ## Update from a .tgz package
 
-Wait for active bot work to finish. Download the new archive, then:
+Wait for active bot work to finish, then:
 
-1. Install the new file using the **same prefix** as before:
+1. Run the versioned command in [Install from a .tgz package](#install-from-a-tgz-package)
+   using the **same prefix** as before. The README on the default branch links to
+   the latest published stable package.
 
-   ```bash
-   npm install --global --prefix "$HOME/.local" /absolute/path/to/opencode2-automation-NEW_VERSION.tgz
-   ```
-
-   Replace the example path with your archive. `postinstall` refreshes registration;
+   `postinstall` refreshes registration;
    project settings and queues are preserved. Do not run `init` again.
 
 2. Reload the service:
@@ -292,13 +296,18 @@ copy it to another machine and follow the `.tgz` instructions above.
 - **Releases:** push a SemVer tag to build and publish a GitHub Release with the
   `.tgz` and SHA-256 checksum. CI verifies that the tag matches the committed
   version in `package.json` and `package-lock.json`. Tests and package installation must pass.
+  Release notes come from the exact version section in [CHANGELOG.md](CHANGELOG.md)
+  at that tag, independently of PR merge timing. Missing, duplicate, or empty
+  version sections stop the release before publication.
 
-For a stable release, merge the PR first, then update your local `main` branch.
-With a clean working tree, run (replace `0.6.0` with your next unused version):
+For a stable release, prepare a changelog section such as `## 0.6.3` with the
+changes for that version, merge the PR, then update your local `main` branch.
+With a clean working tree, run (replace `0.6.3` with your next unused version,
+matching the changelog heading):
 
 ```bash
-npm version 0.6.0
-git push --atomic origin HEAD v0.6.0
+npm version 0.6.3
+git push --atomic origin HEAD v0.6.3
 ```
 
 `npm version` updates both manifests, creates a commit, and tags it automatically.
@@ -306,3 +315,16 @@ The push sends the current branch and tag together. For testing, use a version
 such as `0.7.0-beta.1` on a feature branch; CI marks it as a prerelease.
 CI does not rewrite versions or publish to npm. Releases use the built-in
 `GITHUB_TOKEN`; no npm token or extra secret is needed.
+
+After successful stable publication, the **Update release download in README**
+workflow reads GitHub's latest stable release and checks that its archive and
+checksum are uploaded. It commits the versioned installation block to the current
+default branch. Prereleases do not trigger this update. A tag's README and the
+README inside an existing archive remain snapshots from their build.
+
+The updater needs `contents: write` and branch rules that permit its README commit.
+It preserves content outside the marked block and retries conflicting edits using
+the current file. If this step fails, the release remains published; resolve the
+reported permission or content problem, then run **Update release download in README**
+manually from Actions. The rerun selects the latest stable release again and does
+nothing if the README is already current. Do not rerun publication to repair a link.

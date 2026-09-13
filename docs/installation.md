@@ -4,6 +4,13 @@ Start with the [README](../README.md) for `.tgz` or source installation, updates
 project configuration, headless startup, and removal. This page covers details
 and troubleshooting.
 
+The README's package installation command contains the versioned GitHub asset URL
+for the latest published stable release. Its default-branch copy is updated after
+successful stable publication; prereleases do not replace that link. For upgrades,
+use the current default-branch README rather than a copy from an older archive or
+tag, and keep the same installation prefix. Maintainer setup and retry instructions
+are in [GitHub Actions and releases](../README.md#github-actions-and-releases).
+
 ## Package registration
 
 `npm install --global` runs the bundled `postinstall` script. It writes two small

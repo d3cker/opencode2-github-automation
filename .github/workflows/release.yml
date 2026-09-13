@@ -36,6 +36,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/release-version.mjs "$RELEASE_TAG"
+      - name: Prepare notes for this version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs "$RELEASE_TAG" "$RUNNER_TEMP/release/release-notes.md"
       - name: Lint, typecheck, test, and build
         run: npm run check
       - name: Pack and verify installation
@@ -48,6 +52,7 @@ jobs:
           path: |
             ${{ runner.temp }}/release/*.tgz
             ${{ runner.temp }}/release/*.sha256
+            ${{ runner.temp }}/release/release-notes.md
           if-no-files-found: error
           retention-days: 7
 
@@ -73,8 +78,16 @@ jobs:
           PACKAGE_FILE: ${{ needs.package.outputs.filename }}
         run: |
           sha256sum --check "$PACKAGE_FILE.sha256"
-          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --generate-notes)
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md)
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease --latest=false)
           fi
           gh release create "$RELEASE_TAG" "$PACKAGE_FILE" "$PACKAGE_FILE.sha256" "${args[@]}"
+
+  update-readme:
+    name: Update the stable package download
+    needs: [package, publish]
+    if: needs.package.outputs.prerelease == 'false'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/update-release-readme.yml

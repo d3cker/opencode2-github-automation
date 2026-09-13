@@ -6,6 +6,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "img",
     "docs",
     "prompts",
@@ -31,7 +32,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "lint": "eslint src test scripts eslint.config.mjs --max-warnings 0",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
     "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "package:check": "node scripts/package-check.mjs",
     "install-local": "bash scripts/install-local.sh"
