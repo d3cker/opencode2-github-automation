@@ -23,22 +23,28 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 
 ## Install from a .tgz package
 
-1. Download/copy the archive to the machine running OpenCode 2 and install it
-   (replace `VERSION` with the downloaded version):
+Run this command on the machine running OpenCode 2:
 
-   ```bash
-   npm install --global --prefix "$HOME/.local" "$HOME/Downloads/opencode2-automation-VERSION.tgz"
-   ```
+<!-- latest-release:start -->
+Latest stable release: **[v0.6.2](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.2)**.
 
-   `postinstall` registers both the plugin and TUI automatically. No `sudo`,
-   source checkout, or manual config editing is needed. Do not add
-   `--ignore-scripts`; npm needs network access to install dependencies.
+[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz.sha256)
 
-2. Restart the service when its sessions are idle:
+```bash
+npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.2/opencode2-automation-0.6.2.tgz"
+```
+<!-- latest-release:end -->
 
-   ```bash
-   opencode2 service restart
-   ```
+`postinstall` registers both the plugin and TUI automatically. No `sudo`,
+source checkout, or manual config editing is needed. Do not add
+`--ignore-scripts`; npm needs network access to install dependencies.
+You can also download the archive and pass its local path to the same command.
+
+Restart the service when its sessions are idle:
+
+```bash
+opencode2 service restart
+```
 
 The CLI is now at `$HOME/.local/bin/opencode2-automation`. If `$HOME/.local/bin`
 is on your PATH, you can use the shorter `opencode2-automation` command.
@@ -122,15 +128,13 @@ A reboot-only task does not handle later `opencode2 service restart` calls.
 
 ## Update from a .tgz package
 
-Wait for active bot work to finish. Download the new archive, then:
+Wait for active bot work to finish, then:
 
-1. Install the new file using the **same prefix** as before:
+1. Run the versioned command in [Install from a .tgz package](#install-from-a-tgz-package)
+   using the **same prefix** as before. After publication, the README on `release`
+   links to the new stable package; `main` receives that link through the promotion PR.
 
-   ```bash
-   npm install --global --prefix "$HOME/.local" /absolute/path/to/opencode2-automation-NEW_VERSION.tgz
-   ```
-
-   Replace the example path with your archive. `postinstall` refreshes registration;
+   `postinstall` refreshes registration;
    project settings and queues are preserved. Do not run `init` again.
 
 2. Reload the service:
@@ -287,22 +291,41 @@ copy it to another machine and follow the `.tgz` instructions above.
 
 ## GitHub Actions and releases
 
-- **Pull requests:** CI runs ESLint, type checking, unit tests, a build, and a
-  package installation check on Node 22 and 24. Pushes to `main`/`master` also run CI.
-- **Releases:** push a SemVer tag to build and publish a GitHub Release with the
-  `.tgz` and SHA-256 checksum. CI verifies that the tag matches the committed
-  version in `package.json` and `package-lock.json`. Tests and package installation must pass.
+1. Work on a feature branch and add release notes under `Unreleased` in
+   [CHANGELOG.md](CHANGELOG.md). Ordinary branch pushes do not run CI or publish packages.
+2. Open a PR into the long-lived `release` branch. CI runs lint, type checking,
+   tests, a build, and an installation check on Node 22 and 24. New commits to
+   the open PR rerun these checks. Review and merge after they pass.
+3. The merge starts **Release**. It increments the patch version on `release`,
+   moves the unreleased notes into that version's changelog section, and pushes
+   the version commit and tag atomically. It builds and verifies the tagged
+   package, then publishes the GitHub Release with `.tgz`, SHA-256, and exact
+   version notes. No package is published to npm.
+4. Only after publication succeeds, automation commits the versioned README link
+   on `release` and opens or updates a PR from `release` into `main`.
+5. Review and merge that PR with a **merge commit**. All code, version metadata,
+   release notes, and README changes reach protected `main` through this PR.
+   The automation never pushes to `main` or writes its files through the API.
 
-For a stable release, merge the PR first, then update your local `main` branch.
-With a clean working tree, run (replace `0.6.0` with your next unused version):
+To choose a version manually, prepare and commit its exact changelog section on
+`release`, then use `npm version`, for example:
 
 ```bash
-npm version 0.6.0
-git push --atomic origin HEAD v0.6.0
+git switch release
+git pull --ff-only origin release
+# Prepare and commit the CHANGELOG.md section for 1.0.0 first.
+npm version 1.0.0
+git push --atomic origin release v1.0.0
 ```
 
-`npm version` updates both manifests, creates a commit, and tags it automatically.
-The push sends the current branch and tag together. For testing, use a version
-such as `0.7.0-beta.1` on a feature branch; CI marks it as a prerelease.
-CI does not rewrite versions or publish to npm. Releases use the built-in
-`GITHUB_TOKEN`; no npm token or extra secret is needed.
+The pushed tag publishes exactly `1.0.0`, without another version bump. Both
+`v1.0.0` and `1.0.0` tag names are accepted. The next automatic patch is `1.0.1`.
+Version tags must point to code on `release`; ordinary pushes to that branch
+never start publication. Finish the active release before merging another feature.
+
+The README on `release` is updated after publication; the README on `main` changes
+when the promotion PR is merged. The tag and packaged README remain snapshots
+from before the later README commit.
+
+See [Release process](docs/releases.md) for required repository permissions,
+branch protection, CI approval for bot PRs, concurrency, and safe retry procedures.
