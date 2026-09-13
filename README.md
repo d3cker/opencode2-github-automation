@@ -131,8 +131,8 @@ A reboot-only task does not handle later `opencode2 service restart` calls.
 Wait for active bot work to finish, then:
 
 1. Run the versioned command in [Install from a .tgz package](#install-from-a-tgz-package)
-   using the **same prefix** as before. The README on the default branch links to
-   the latest published stable package.
+   using the **same prefix** as before. After publication, the README on `release`
+   links to the new stable package; `main` receives that link through the promotion PR.
 
    `postinstall` refreshes registration;
    project settings and queues are preserved. Do not run `init` again.
@@ -291,40 +291,41 @@ copy it to another machine and follow the `.tgz` instructions above.
 
 ## GitHub Actions and releases
 
-- **Pull requests:** CI runs ESLint, type checking, unit tests, a build, and a
-  package installation check on Node 22 and 24. Pushes to `main`/`master` also run CI.
-- **Releases:** push a SemVer tag to build and publish a GitHub Release with the
-  `.tgz` and SHA-256 checksum. CI verifies that the tag matches the committed
-  version in `package.json` and `package-lock.json`. Tests and package installation must pass.
-  Release notes come from the exact version section in [CHANGELOG.md](CHANGELOG.md)
-  at that tag, independently of PR merge timing. Missing, duplicate, or empty
-  version sections stop the release before publication.
+1. Work on a feature branch and add release notes under `Unreleased` in
+   [CHANGELOG.md](CHANGELOG.md). Ordinary branch pushes do not run CI or publish packages.
+2. Open a PR into the long-lived `release` branch. CI runs lint, type checking,
+   tests, a build, and an installation check on Node 22 and 24. New commits to
+   the open PR rerun these checks. Review and merge after they pass.
+3. The merge starts **Release**. It increments the patch version on `release`,
+   moves the unreleased notes into that version's changelog section, and pushes
+   the version commit and tag atomically. It builds and verifies the tagged
+   package, then publishes the GitHub Release with `.tgz`, SHA-256, and exact
+   version notes. No package is published to npm.
+4. Only after publication succeeds, automation commits the versioned README link
+   on `release` and opens or updates a PR from `release` into `main`.
+5. Review and merge that PR with a **merge commit**. All code, version metadata,
+   release notes, and README changes reach protected `main` through this PR.
+   The automation never pushes to `main` or writes its files through the API.
 
-For a stable release, prepare a changelog section such as `## 0.6.3` with the
-changes for that version, merge the PR, then update your local `main` branch.
-With a clean working tree, run (replace `0.6.3` with your next unused version,
-matching the changelog heading):
+To choose a version manually, prepare and commit its exact changelog section on
+`release`, then use `npm version`, for example:
 
 ```bash
-npm version 0.6.3
-git push --atomic origin HEAD v0.6.3
+git switch release
+git pull --ff-only origin release
+# Prepare and commit the CHANGELOG.md section for 1.0.0 first.
+npm version 1.0.0
+git push --atomic origin release v1.0.0
 ```
 
-`npm version` updates both manifests, creates a commit, and tags it automatically.
-The push sends the current branch and tag together. For testing, use a version
-such as `0.7.0-beta.1` on a feature branch; CI marks it as a prerelease.
-CI does not rewrite versions or publish to npm. Releases use the built-in
-`GITHUB_TOKEN`; no npm token or extra secret is needed.
+The pushed tag publishes exactly `1.0.0`, without another version bump. Both
+`v1.0.0` and `1.0.0` tag names are accepted. The next automatic patch is `1.0.1`.
+Version tags must point to code on `release`; ordinary pushes to that branch
+never start publication. Finish the active release before merging another feature.
 
-After successful stable publication, the **Update release download in README**
-workflow reads GitHub's latest stable release and checks that its archive and
-checksum are uploaded. It commits the versioned installation block to the current
-default branch. Prereleases do not trigger this update. A tag's README and the
-README inside an existing archive remain snapshots from their build.
+The README on `release` is updated after publication; the README on `main` changes
+when the promotion PR is merged. The tag and packaged README remain snapshots
+from before the later README commit.
 
-The updater needs `contents: write` and branch rules that permit its README commit.
-It preserves content outside the marked block and retries conflicting edits using
-the current file. If this step fails, the release remains published; resolve the
-reported permission or content problem, then run **Update release download in README**
-manually from Actions. The rerun selects the latest stable release again and does
-nothing if the README is already current. Do not rerun publication to repair a link.
+See [Release process](docs/releases.md) for required repository permissions,
+branch protection, CI approval for bot PRs, concurrency, and safe retry procedures.

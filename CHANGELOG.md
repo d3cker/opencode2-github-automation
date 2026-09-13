@@ -1,9 +1,10 @@
 # Changelog
 
 Release descriptions come from the exact version section committed with the tag.
-Keep unreleased changes here, then move them into a `## MAJOR.MINOR.PATCH` section
-before creating the release tag. Prerelease headings include the full version,
-for example `## 0.7.0-beta.1`.
+Add feature changes under `Unreleased`; after a PR merges into `release`, automation
+moves them into the new patch version's section. For a manual release, prepare
+and commit the exact version section before creating its tag. Prerelease headings
+include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
@@ -12,7 +13,18 @@ for example `## 0.7.0-beta.1`.
 - Generate release descriptions from the matching changelog section, so publishing
   a tag before its PR merges no longer produces notes about an earlier release.
 - Show the latest published stable package's versioned download URL in the README
-  and update it automatically after successful stable releases.
+  on `release` after successful publication, then promote it to `main` through a PR.
+
+### Release process
+
+- Run full CI when feature PRs target `release`, including new commits to open PRs.
+  Ordinary feature pushes no longer run CI or build packages.
+- Publish an automatic patch after a PR merges into `release`, and support manual
+  version tags on that branch without a second version bump.
+- Recover interrupted publication without moving tags or republishing completed
+  packages. Commit README on `release` before opening or updating its PR to `main`.
+- Keep `main` changes behind PR merges and verify that promotion contains the
+  published package's code and updated download links.
 
 ## 0.6.2
 

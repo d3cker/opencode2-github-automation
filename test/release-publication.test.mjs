@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { releaseNotes } from "../scripts/release-notes.mjs";
-import { syncReadme, updateReadme } from "../scripts/update-release-readme.mjs";
+import { updateReadme } from "../scripts/update-release-readme.mjs";
 
 const repository = "example/automation";
 const readme = "# Product\n\n<!-- latest-release:start -->\nold install\n<!-- latest-release:end -->\n\nOther instructions.\n";
@@ -18,10 +18,6 @@ function release(version = "0.6.2", tag = `v${version}`) {
     })),
   };
 }
-function file(content, sha = "original-sha") {
-  return { encoding: "base64", sha, content: Buffer.from(content).toString("base64") };
-}
-
 test("release notes select only the exact tagged version regardless of surrounding releases", () => {
   const changelog = "# Changelog\n\n## Unreleased\n- Future\n\n## 0.6.2\n### Fixed\n- Keep owner active\n\n## 0.6.1\n- Banner\n";
   assert.equal(releaseNotes(changelog, "v0.6.2"), "### Fixed\n- Keep owner active\n");
@@ -78,72 +74,5 @@ test("README refuses drafts, prereleases, absent assets, and untrusted download 
 test("README refuses missing, duplicate, or reversed markers", () => {
   for (const content of ["# README", readme + readme, "<!-- latest-release:end --><!-- latest-release:start -->"]) {
     assert.throws(() => updateReadme(content, release(), repository), /marker/);
-  }
-});
-
-test("a delayed updater queries latest and writes only the default-branch README with its SHA", async () => {
-  const calls = [];
-  const request = async (method, path, body) => {
-    calls.push({ method, path, body });
-    if (path === `/repos/${repository}`) return { default_branch: "main" };
-    if (path.endsWith("?ref=main")) return file(readme);
-    if (path.endsWith("/latest")) return release("0.6.4");
-    assert.equal(method, "PUT");
-    return {};
-  };
-  assert.equal(await syncReadme(repository, request), "Updated README on main to v0.6.4.");
-  const put = calls.at(-1);
-  assert.equal(put.path, `/repos/${repository}/contents/README.md`);
-  assert.equal(put.body.sha, "original-sha");
-  assert.equal(put.body.branch, "main");
-  assert.equal(Buffer.from(put.body.content, "base64").toString(), updateReadme(readme, release("0.6.4"), repository));
-});
-
-test("an up-to-date README produces no commit", async () => {
-  const updated = updateReadme(readme, release(), repository);
-  const request = async (method, path) => {
-    assert.equal(method, "GET");
-    if (path.endsWith("/latest")) return release();
-    if (path.includes("/contents/")) return file(updated);
-    return { default_branch: "master" };
-  };
-  assert.match(await syncReadme(repository, request), /already points to v0.6.2/);
-});
-
-test("a conflicting edit retries with fresh content, SHA, and latest release", async () => {
-  let writes = 0;
-  const concurrent = readme.replace("Other instructions.", "Someone else's new instructions.");
-  const request = async (method, path, body) => {
-    if (method === "PUT") {
-      writes++;
-      if (writes === 1) throw Object.assign(new Error("Conflict"), { status: 409 });
-      assert.equal(body.sha, "new-sha");
-      const content = Buffer.from(body.content, "base64").toString();
-      assert.match(content, /Someone else's new instructions/);
-      assert.match(content, /v0\.6\.3/);
-      return {};
-    }
-    if (path.endsWith("/latest")) return release(writes ? "0.6.3" : "0.6.2");
-    if (path.includes("/contents/")) return file(writes ? concurrent : readme, writes ? "new-sha" : "original-sha");
-    return { default_branch: "main" };
-  };
-  assert.match(await syncReadme(repository, request), /v0.6.3/);
-  assert.equal(writes, 2);
-});
-
-test("write failures are surfaced and conflict retries are bounded", async () => {
-  for (const status of [403, 409, 422]) {
-    let writes = 0;
-    const request = async (method, path) => {
-      if (method === "PUT") {
-        writes++;
-        throw Object.assign(new Error("Write failed"), { status });
-      }
-      if (path.endsWith("/latest")) return release();
-      if (path.includes("/contents/")) return file(readme);
-      return { default_branch: "main" };
-    };
-    await assert.rejects(syncReadme(repository, request), /Write failed/);
-    assert.equal(writes, status === 409 ? 3 : 1);
   }
 });
