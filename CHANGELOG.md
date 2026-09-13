@@ -8,6 +8,8 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.3
+
 ### Fixed
 
 - Generate release descriptions from the matching changelog section, so publishing
