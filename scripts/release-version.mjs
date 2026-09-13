@@ -13,7 +13,7 @@ try {
     throw new Error("package.json and package-lock.json must describe the same root package.");
   }
   if (pkg.version !== version || lock.version !== version || lock.packages[""].version !== version) {
-    throw new Error(`Release tag ${tag} must match the version in package.json and both root versions in package-lock.json. Use npm version to commit the version and create its tag before pushing.`);
+    throw new Error(`Release tag ${tag} must match the version in package.json and both root versions in package-lock.json. Prepare the version and tag on release, never on main.`);
   }
   const prerelease = semver.prerelease(version) !== null;
   if (process.env.GITHUB_OUTPUT) {
