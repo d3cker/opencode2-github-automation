@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { SchedulerOptions } from "../config.js";
 import { Scheduler, SchedulerState } from "../scheduler.js";
 import { SchedulerRpc, handlerRpc } from "../rpc.js";
-import { acquire, JsonStore } from "../state.js";
+import { acquire, JsonStore, redact } from "../state.js";
+import { cleanup, heartbeat, touchOwner } from "../lifecycle.js";
 
 export default Plugin.define({
   id: "automation.scheduler",
@@ -18,17 +19,31 @@ export default Plugin.define({
       const method = ctx.rpc(handlerRpc(job.rpcID, job.method))[job.method]!;
       return method(job.input, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]) });
     });
+    let registration: { dispose(): Promise<void> } | undefined;
+    let stopHeartbeat: (() => Promise<void>) | undefined;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stop = () => cleanup(
+      () => { clearInterval(timer); controller.abort(); },
+      () => stopHeartbeat?.(),
+      () => scheduler.settle(),
+      () => registration?.dispose(),
+      release,
+    );
     try {
       await scheduler.init();
-      const registration = await ctx.rpc.register(SchedulerRpc, {
+      registration = await ctx.rpc.register(SchedulerRpc, {
         status: async () => JSON.parse(JSON.stringify(scheduler.status())),
         run: async ({ id }) => { controller.signal.throwIfAborted(); return { started: await scheduler.run(id) }; },
         pause: async ({ id, paused }) => { controller.signal.throwIfAborted(); await scheduler.pause(id, paused); return { ok: true }; },
       });
       const tick = () => { if (!controller.signal.aborted) void scheduler.tick().catch(error => { console.error("Scheduler stopped", error); controller.abort(error); }); };
-      const timer = setInterval(tick, 1000);
+      timer = setInterval(tick, 1000);
+      stopHeartbeat = heartbeat(signal => touchOwner(options.ownerDirectory, signal), error => console.error("Scheduler owner heartbeat failed", redact(error)));
       tick();
-      return async () => { clearInterval(timer); controller.abort(); await registration.dispose(); await scheduler.settle(); await release(); };
-    } catch (error) { controller.abort(); await release(); throw error; }
+      return stop;
+    } catch (error) {
+      await stop().catch(cause => console.error("Scheduler cleanup failed", redact(cause)));
+      throw error;
+    }
   },
 });

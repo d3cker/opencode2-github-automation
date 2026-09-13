@@ -101,6 +101,20 @@ uncertain network results. Uncertain initial prompt delivery is not automaticall
 resent. Issue replies and helper prompts use deterministic IDs for admission retries.
 Merge requests pin the verified head SHA and reconcile an already-merged PR.
 
+The shared service can evict an idle owner location even while an agent works in
+a different worktree. Scheduler and dispatcher components therefore refresh the
+owner every 30 seconds through the public plugin-list API, after confirming the
+service PID matches their own process. Transient heartbeat errors are logged and
+retried; requests do not overlap. A standalone server without a matching service
+registration skips this mechanism. Keep its owner location in use or use the
+shared background service for unattended automation.
+
+Cleanup aborts and settles work before releasing ownership. All cleanup steps
+are attempted even when RPC disposal fails; locks are not forcibly removed or
+stolen from another owner. A held-lock startup error should be investigated via
+plugin details and server logs. Back up the queue and worktree before recovery;
+do not assume a failed session means its edits were lost.
+
 Only one issue executes at a time. Checks must succeed before publication. Push
 uses the exact verified commit without force. Worktrees remain available for
 inspection; automatic cleanup is not implemented.

@@ -10,6 +10,7 @@ import { GithubRpc } from "../rpc.js";
 import { acquire, JsonStore, redact } from "../state.js";
 import { githubToken } from "../easy.js";
 import type { Activity } from "../activity.js";
+import { cleanup, heartbeat, touchOwner } from "../lifecycle.js";
 
 export default Plugin.define({
   id: "automation.github",
@@ -23,6 +24,17 @@ export default Plugin.define({
     let publish: (activity: Activity) => Promise<void> = async () => {};
     const dispatcher = new Dispatcher(options, new JsonStore(join(options.stateDirectory, "queue.json"), Queue, () => ({ version: 1, tasks: [] })), new Github(token, controller.signal, fetch, options.signature), executor, controller.signal, [token], Date.now, activity => publish(activity));
     let releaseBridge: (() => void) | undefined;
+    let registration: { dispose(): Promise<void> } | undefined;
+    let stopHeartbeat: (() => Promise<void>) | undefined;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stop = () => cleanup(
+      () => { clearInterval(timer); controller.abort(); },
+      () => stopHeartbeat?.(),
+      () => dispatcher.settle(),
+      () => registration?.dispose(),
+      () => releaseBridge?.(),
+      release,
+    );
     try {
       await dispatcher.init();
       releaseBridge = registerRuntimeBridge(options.ownerDirectory, {
@@ -30,7 +42,7 @@ export default Plugin.define({
         question: async ({ sessionID, id, text, permission }) => dispatcher.question(sessionID, id, text, permission),
         helper: async ({ sessionID, callID, capability }) => dispatcher.helper(sessionID, callID, capability),
       });
-      const registration = await ctx.rpc.register(GithubRpc, {
+      const rpc = await ctx.rpc.register(GithubRpc, {
         runtime: async ({ sessionID }) => JSON.parse(JSON.stringify(dispatcher.runtime(sessionID))),
         question: async ({ sessionID, id, text, permission }) => dispatcher.question(sessionID, id, text, permission),
         helper: async ({ sessionID, callID, capability }) => dispatcher.helper(sessionID, callID, capability),
@@ -43,11 +55,16 @@ export default Plugin.define({
         activity: async () => dispatcher.activity(),
         retry: async ({ key, restartSession }) => { controller.signal.throwIfAborted(); return { accepted: await dispatcher.retry(key, restartSession) }; },
       });
-      publish = activity => registration.events.emit("activity", activity);
+      registration = rpc;
+      publish = activity => rpc.events.emit("activity", activity);
       const tick = () => { if (!controller.signal.aborted) void dispatcher.tick().catch(error => { console.error("Dispatcher stopped", redact(error, [token])); controller.abort(error); }); };
-      const timer = setInterval(tick, options.workerEverySeconds * 1000);
+      timer = setInterval(tick, options.workerEverySeconds * 1000);
+      stopHeartbeat = heartbeat(signal => touchOwner(options.ownerDirectory, signal), error => console.error("Automation owner heartbeat failed", redact(error, [token])));
       tick();
-      return async () => { clearInterval(timer); controller.abort(); await registration.dispose(); await dispatcher.settle(); releaseBridge?.(); await release(); };
-    } catch (error) { controller.abort(); releaseBridge?.(); await release(); throw error; }
+      return stop;
+    } catch (error) {
+      await stop().catch(cause => console.error("Automation cleanup failed", redact(cause, [token])));
+      throw error;
+    }
   },
 });
