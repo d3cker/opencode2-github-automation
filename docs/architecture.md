@@ -42,5 +42,12 @@ The primary checkout owns scheduling. Worker worktrees do not start additional
 schedulers. A shared Git-directory state folder holds the queue and locks; separate
 machines require separate test repositories to avoid duplicate execution.
 
+In the shared background service, each scheduler/dispatcher component sends a
+periodic request back to its owner location to prevent idle eviction while work
+runs elsewhere. It checks the service PID before touching the location, so a
+standalone instance cannot activate another owner in a different service.
+Shutdown settles work and attempts all cleanup steps, including lock release,
+even if an SDK registration fails to dispose after location eviction.
+
 See [advanced configuration](advanced.md) for retry commands, limits, and RPC
 settings, and the [README](../README.md) for installation and user-facing behavior.

@@ -45,6 +45,18 @@ The queue retains waiting questions and accepted replies across restarts.
 After restarting the service, load the owner project again to resume polling.
 No terminal UI is needed to answer in GitHub.
 
+The automation owner must remain loaded while its worktree sessions run. In the
+shared background service, the plugin refreshes the owner location every 30
+seconds, independently of issue polling and its pause setting. This prevents
+idle owner eviction from disconnecting worker hooks and publication. The refresh
+only targets a service whose PID matches the plugin process; standalone servers
+without a matching registered service do not receive this heartbeat.
+
+If the plugin reports a held lock or a worker reports unavailable automation RPC,
+inspect plugin details, logs, and queue state before retrying. Preserve the
+worktree and queue; a failed session can still contain completed changes. Do not
+remove an active lock or restart implementation just to recover publication.
+
 ## Tabs after PR closure
 
 Each repository scan checks the state of tracked PRs independently of the
