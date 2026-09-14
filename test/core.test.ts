@@ -9,6 +9,8 @@ import { Scheduler } from "../src/scheduler.js";
 import { Dispatcher, Blocked, Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
 import { JsonStore, acquire, type Store } from "../src/state.js";
 import { Github, GithubError, type Issue, type Comment } from "../src/github.js";
+import type { Plugin } from "@opencode/plugin";
+import { OpenCodeExecutor } from "../src/executor.js";
 
 const route = { agent: "build", model: { providerID: "deepseek", id: "test-model" } };
 const options = GithubOptions.parse({ ownerDirectory: "/repo", stateDirectory: "/state", repositories: [{ repo: "owner/repo", directory: "/repo", baseBranch: "main", allowedAuthors: ["alice"], checks: [["npm", "test"]] }], routes: { "@deepseek": route } });
@@ -43,6 +45,39 @@ function fixture() {
   const make = () => new Dispatcher(options, store, github, executor, new AbortController().signal, [], () => time);
   return { events, store, github, executor, make, advance: () => { time += 4_000_000; } };
 }
+
+test("an evicted dispatcher resumes the completed saved session and publishes exactly once", async () => {
+  const f = fixture(), controller = new AbortController();
+  let prompts = 0, interrupts = 0, finished = false;
+  let entered!: () => void, complete!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const sdkWait = new Promise<void>(resolve => { complete = resolve; });
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" }, outcome: finished ? "succeeded" : undefined }),
+    prompt: async () => { prompts++; },
+    // Deliberately ignore request options, as the affected OpenCode adapter does.
+    wait: async () => { entered(); if (!finished) await sdkWait; },
+    context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+    interrupt: async () => { interrupts++; },
+  } } as unknown as Plugin.Context;
+  const original = new OpenCodeExecutor(ctx, options, controller.signal, async () => {});
+  f.executor.run = original.run.bind(original);
+  const old = new Dispatcher(options, f.store, f.github, f.executor, controller.signal, [], () => 1000);
+  await old.init(); await old.scan();
+  const running = old.tick(); await waiting;
+  const sessionID = f.store.data.tasks[0]!.sessionID;
+  controller.abort(); await running; await old.settle();
+  assert.equal(f.store.data.tasks[0]!.phase, "running");
+  assert.equal(interrupts, 0);
+  finished = true; complete();
+  const resumed = new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+  f.executor.run = resumed.run.bind(resumed);
+  const next = f.make(); await next.init(); await next.tick(); await next.tick();
+  assert.equal(next.status()[0]!.status, "done");
+  assert.equal(next.status()[0]!.sessionID, sessionID);
+  assert.equal(prompts, 1);
+  assert.deepEqual(f.events, ["analyze", "comment", "prepare", "verify", "push", "pr"]);
+});
 
 function proposalFixture(botLogin = "alice") {
   const f = fixture();

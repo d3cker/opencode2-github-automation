@@ -77,6 +77,7 @@ export class Dispatcher {
     this.signal.throwIfAborted();
     let announce = false;
     await this.serial.run(async () => {
+      this.signal.throwIfAborted();
       announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed", "waiting"].includes(patch.status));
       announce ||= patch.pr?.state === "closed" && task.pr?.state !== "closed";
       if (patch.sessionID) task.sessionIDs = [...new Set([...task.sessionIDs ?? [], ...[task.previousSessionID, task.sessionID, patch.sessionID].filter((id): id is string => Boolean(id))])];

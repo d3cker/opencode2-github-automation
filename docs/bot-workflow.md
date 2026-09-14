@@ -35,20 +35,22 @@ flowchart TD
   cancel accepted work or active sessions.
 - A scan cannot overlap another scan in the same dispatcher. Only one worker
   invocation runs at a time; one scheduler job cannot overlap itself.
-- Each component refreshes the owner through the matching background service's
-  plugin-list API every 30 seconds. A PID check prevents activating a second
-  owner in another service. Requests do not overlap and have a 15-second deadline.
-  This heartbeat keeps the owner loaded while execution happens in worktrees;
-  pausing issue scans does not pause it. Standalone servers without a matching
-  registered service skip the refresh.
+- Each component renews one empty owner maintenance session at startup and every
+  ten minutes. Durable session events refresh OpenCode's inactivity timer; listing
+  plugins does not. No model is prompted. A PID check prevents touching a different
+  service. Requests do not overlap and have a 15-second deadline. Pausing issue
+  scans does not pause keepalive. Standalone servers without a matching registered
+  service skip it.
 - State is schema-validated and saved through a temporary file, file sync, and
   rename. A corrupt state file fails to load rather than resetting the queue.
   Local locks prevent duplicate owners sharing this state directory; independent
   machines do not share ownership.
-- Shutdown clears timers, aborts operations, waits for in-flight work, disposes
-  registrations, and releases locks. Cleanup attempts the remaining steps even
-  if an earlier step fails, so an evicted RPC registration cannot skip lock
-  release. Executor shutdown interrupts its task session.
+- Shutdown clears timers and aborts local SDK waits even if the adapter ignores
+  cancellation. It settles local writes, bounds RPC disposal to five seconds per
+  component, and attempts all cleanup steps before releasing ownership. A replacement
+  waits up to 15 seconds for locks without removing them. Healthy worktree sessions
+  continue; the next owner reconciles the saved session before verifying and publishing.
+
 
 Sources: [index.ts](../src/index.ts), [easy.ts](../src/easy.ts),
 [GitHub plugin](../src/plugins/github.ts),

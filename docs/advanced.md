@@ -101,19 +101,23 @@ uncertain network results. Uncertain initial prompt delivery is not automaticall
 resent. Issue replies and helper prompts use deterministic IDs for admission retries.
 Merge requests pin the verified head SHA and reconcile an already-merged PR.
 
-The shared service can evict an idle owner location even while an agent works in
-a different worktree. Scheduler and dispatcher components therefore refresh the
-owner every 30 seconds through the public plugin-list API, after confirming the
-service PID matches their own process. Transient heartbeat errors are logged and
-retried; requests do not overlap. A standalone server without a matching service
-registration skips this mechanism. Keep its owner location in use or use the
-shared background service for unattended automation.
+The shared service evicts owner locations after roughly an hour without durable
+session activity, even if plugin RPC or HTTP requests continue. Components use one
+deterministically identified, empty maintenance session per owner directory and
+rename it at startup and every ten minutes. Creation is idempotent, metadata and
+location are checked before renaming, and no model is prompted. Requests have a
+15-second deadline, never overlap, and require a matching service PID. Standalone
+servers without a matching service registration skip this mechanism; use the
+shared service for unattended automation.
 
-Cleanup aborts and settles work before releasing ownership. All cleanup steps
-are attempted even when RPC disposal fails; locks are not forcibly removed or
-stolen from another owner. A held-lock startup error should be investigated via
-plugin details and server logs. Back up the queue and worktree before recovery;
-do not assume a failed session means its edits were lost.
+SDK adapters may ignore AbortSignal. The plugin therefore bounds its own SDK waits,
+preserves healthy worker execution on owner disposal, and settles local state writes
+before releasing ownership. A replacement waits up to 15 seconds for the retiring
+owner's locks. RPC disposal has a five-second deadline per component; cleanup still
+attempts every remaining step. No live lock is forcibly removed. A held-lock startup
+error should be investigated via plugin details and server logs. Back up the queue,
+worktree, and session database before recovery. Reconcile an already-published PR
+and saved session instead of restarting implementation or deleting the worktree.
 
 Only one issue executes at a time. Checks must succeed before publication. Push
 uses the exact verified commit without force. Worktrees remain available for

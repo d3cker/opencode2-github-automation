@@ -5,7 +5,7 @@ import { SchedulerOptions } from "../config.js";
 import { Scheduler, SchedulerState } from "../scheduler.js";
 import { SchedulerRpc, handlerRpc } from "../rpc.js";
 import { acquire, JsonStore, redact } from "../state.js";
-import { cleanup, heartbeat, touchOwner } from "../lifecycle.js";
+import { abortable, cleanup, heartbeat, touchOwner } from "../lifecycle.js";
 
 export default Plugin.define({
   id: "automation.scheduler",
@@ -13,11 +13,12 @@ export default Plugin.define({
     const options = SchedulerOptions.parse(ctx.options);
     if (await realpath(ctx.location.directory) !== await realpath(options.ownerDirectory)) return;
     const controller = new AbortController();
-    const release = await acquire(options.stateDirectory, "scheduler", error => controller.abort(error));
+    const release = await acquire(options.stateDirectory, "scheduler", error => controller.abort(error), true);
     const scheduler = new Scheduler(options.jobs, new JsonStore(join(options.stateDirectory, "scheduler.json"), SchedulerState, () => []), async job => {
       controller.signal.throwIfAborted();
       const method = ctx.rpc(handlerRpc(job.rpcID, job.method))[job.method]!;
-      return method(job.input, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]) });
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
+      return abortable(() => method(job.input, { signal }), signal);
     });
     let registration: { dispose(): Promise<void> } | undefined;
     let stopHeartbeat: (() => Promise<void>) | undefined;
@@ -26,7 +27,7 @@ export default Plugin.define({
       () => { clearInterval(timer); controller.abort(); },
       () => stopHeartbeat?.(),
       () => scheduler.settle(),
-      () => registration?.dispose(),
+      () => abortable(async () => { await registration?.dispose(); }, AbortSignal.timeout(5_000)),
       release,
     );
     try {

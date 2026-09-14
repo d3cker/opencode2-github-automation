@@ -46,11 +46,18 @@ After restarting the service, load the owner project again to resume polling.
 No terminal UI is needed to answer in GitHub.
 
 The automation owner must remain loaded while its worktree sessions run. In the
-shared background service, the plugin refreshes the owner location every 30
-seconds, independently of issue polling and its pause setting. This prevents
-idle owner eviction from disconnecting worker hooks and publication. The refresh
-only targets a service whose PID matches the plugin process; standalone servers
-without a matching registered service do not receive this heartbeat.
+shared background service, keepalive runs at startup and every ten minutes,
+independently of issue polling and its pause setting. It reuses one empty session
+named `Automation owner keepalive` in the primary checkout. The session has no
+messages, consumes no model tokens, and is not an issue task. Its durable rename
+event refreshes OpenCode's activity timer; requests to list plugins do not.
+Keepalive only targets a service whose PID matches the plugin process. Standalone
+servers without a matching registered service do not receive this protection.
+
+On owner reload, the dispatcher stops waiting locally and releases its lock without
+interrupting a healthy worker. The next owner reconnects to the saved session ID,
+checks its outcome, verifies the changes, and resumes publication. Explicit task
+cancellation, unanswered questions, and session deadlines still interrupt workers.
 
 If the plugin reports a held lock or a worker reports unavailable automation RPC,
 inspect plugin details, logs, and queue state before retrying. Preserve the
