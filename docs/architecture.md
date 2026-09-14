@@ -42,12 +42,14 @@ The primary checkout owns scheduling. Worker worktrees do not start additional
 schedulers. A shared Git-directory state folder holds the queue and locks; separate
 machines require separate test repositories to avoid duplicate execution.
 
-In the shared background service, each scheduler/dispatcher component sends a
-periodic request back to its owner location to prevent idle eviction while work
-runs elsewhere. It checks the service PID before touching the location, so a
-standalone instance cannot activate another owner in a different service.
-Shutdown settles work and attempts all cleanup steps, including lock release,
-even if an SDK registration fails to dispose after location eviction.
+In the shared background service, each scheduler/dispatcher component renews one
+empty maintenance session in the owner location at startup and every ten minutes.
+OpenCode counts durable session events as activity; polling plugin APIs alone
+does not prevent its hourly inactivity eviction. No model is prompted by keepalive.
+The service PID must match the plugin process before any maintenance session is
+created. Shutdown releases local SDK waits independently of adapter cancellation,
+settles state writes, bounds RPC disposal, and releases locks. A healthy worktree
+session continues and the replacement owner reconciles its saved identity.
 
 See [advanced configuration](advanced.md) for retry commands, limits, and RPC
 settings, and the [README](../README.md) for installation and user-facing behavior.

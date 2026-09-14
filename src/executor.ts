@@ -9,6 +9,7 @@ import { analysisDecision } from "./analysis.js";
 import { baseChoice, type BranchInput } from "./branch.js";
 import { installWorkerPlugin } from "./worker.js";
 import { Blocked, WaitingForAnswer, type Executor, type Task } from "./dispatcher.js";
+import { cancellable } from "./lifecycle.js";
 
 export type CommandRunner = (cwd: string, argv: string[]) => Promise<string>;
 export function commandRunner(signal: AbortSignal, timeout: number, secretEnv: string): CommandRunner {
@@ -104,6 +105,7 @@ export class GitWorkspace {
 export class OpenCodeExecutor implements Executor {
   private git: GitWorkspace;
   constructor(private ctx: Plugin.Context, private options: GithubOptions, private signal: AbortSignal, private runtimeInstaller = installWorkerPlugin) {
+    this.ctx = { ...ctx, ...(ctx.session ? { session: cancellable(ctx.session) } : {}), ...(ctx.generate ? { generate: cancellable(ctx.generate) } : {}) };
     this.git = new GitWorkspace(options.stateDirectory, commandRunner(signal, options.commandTimeoutSeconds * 1000, options.tokenEnv));
   }
   async title(task: Task) {
@@ -156,11 +158,9 @@ export class OpenCodeExecutor implements Executor {
     return this.runtimeInstaller(directory, this.options, commandRunner(this.signal, this.options.commandTimeoutSeconds * 1000, this.options.tokenEnv));
   }
   async run(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>) {
-    try { await this.runSession(task, checkpoint); }
-    catch (error) {
-      if (this.signal.aborted) await this.cancel(task);
-      throw error;
-    }
+    // Owner disposal must not interrupt a healthy worker in another location.
+    // The replacement owner resumes waiting on the saved session ID.
+    await this.runSession(task, checkpoint);
   }
   private async runSession(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>) {
     if (!task.worktree || !task.route) throw new Blocked("Missing execution configuration");

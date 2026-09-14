@@ -28,10 +28,14 @@ export class JsonStore<T> implements Store<T> {
   }
 }
 
-export async function acquire(directory: string, name: string, compromised: (error: Error) => void) {
+export async function acquire(directory: string, name: string, compromised: (error: Error) => void, waitForPrevious = false) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   return lockfile.lock(join(directory, name), {
-    realpath: false, stale: 30_000, update: 10_000, retries: 0, onCompromised: compromised,
+    realpath: false, stale: 30_000, update: 10_000,
+    // Location invalidation can start a replacement before the old plugin's
+    // finalizers finish. Wait for release, never remove a live owner's lock.
+    retries: waitForPrevious ? { retries: 30, factor: 1, minTimeout: 500, maxTimeout: 500 } : 0,
+    onCompromised: compromised,
   });
 }
 
