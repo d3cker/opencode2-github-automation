@@ -107,7 +107,7 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     assert.equal(await git.hasBranch(repo, "release/next"), true);
     assert.equal(await git.hasBranch(repo, "release"), false);
     assert.equal(await git.hasBranch(repo, "missing"), false);
-    const t = task(); Object.assign(t, await git.prepare(t, repo));
+    const t: Task = { ...task(), worktree: undefined }; Object.assign(t, await git.prepare(t, repo));
     assert.equal(t.baseSha, selectedBase);
     assert.match(await readFile(join(t.worktree!, "release.txt"), "utf8"), /release-only/);
     await installWorkerPlugin(t.worktree!, options, run);
@@ -124,10 +124,30 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     const withoutTests = await git.verify(t, { ...repo, checks: [] });
     assert.deepEqual(withoutTests.checks, []);
     assert.equal(withoutTests.commit, t.commit);
+    // Recovery can rename a published branch without moving its worktree.
+    // Follow-up prepare, verification, and push must all honor the checkpoint.
+    const savedPath = t.worktree!, savedBase = t.baseSha;
+    await run(savedPath, ["git", "branch", "-m", "recovered-feature"]);
+    t.branch = "recovered-feature";
+    await writeFile(join(savedPath, "followup.txt"), "preserve this uncommitted work\n");
+    Object.assign(t, await git.prepare(t, repo));
+    assert.equal(t.worktree, savedPath);
+    assert.equal(t.baseSha, savedBase);
+    assert.equal(await readFile(join(savedPath, "followup.txt"), "utf8"), "preserve this uncommitted work\n");
+    Object.assign(t, await git.verify(t, repo));
+    await git.push(t, repo);
+    assert.equal(await run(dir, ["git", "--git-dir", remote, "rev-parse", "refs/heads/recovered-feature"]), t.commit);
+    await assert.rejects(git.prepare({ ...t, worktree: join(state, "worktrees", "missing-checkpoint") }, repo), /Saved task worktree is missing/);
+    await assert.rejects(git.prepare({ ...t, worktree: checkout }, repo), /Unexpected worktree path/);
+    await assert.rejects(git.prepare({ ...t, branch: "wrong-branch" }, repo), /Worktree branch changed/);
+    const foreign = join(savedPath, "..", "foreign");
+    await mkdir(foreign);
+    await run(foreign, ["git", "init", "-b", t.branch]);
+    await assert.rejects(git.prepare({ ...t, worktree: foreign }, repo), /another repository/);
     assert.equal(await run(t.worktree!, ["git", "ls-files", "--", ".opencode/plugins/automation-runtime/index.js"]), "");
     await writeFile(runtimePath, "// User customization\n");
     await assert.rejects(installWorkerPlugin(t.worktree!, options, run), /customized/);
-    await assert.rejects(git.prepare({ ...task(), branch: "automation/missing-base" }, { ...repo, baseBranch: "missing" }), /Could not fetch base branch missing/);
+    await assert.rejects(git.prepare({ ...task(), worktree: undefined, branch: "automation/missing-base" }, { ...repo, baseBranch: "missing" }), /Could not fetch base branch missing/);
     await writeFile(join(t.worktree!, "counter.txt"), "changed after verification\n");
     await assert.rejects(git.push(t, repo), /changed after verification/);
   } finally { await rm(dir, { recursive: true, force: true }); }
