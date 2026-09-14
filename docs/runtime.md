@@ -180,6 +180,12 @@ acknowledgement, implementation, and a push to the same open PR. The mention doe
 not need to be repeated. Comments received during execution wait for the next
 round. A mention in an authorized comment can also start work on an untracked issue.
 
+Follow-up rounds reuse the worktree path saved in the queue, even if recovery
+renamed its branch. Preparation, verification, and push validate that path as a
+worktree root directly inside the managed worktree directory, attached to the
+expected branch and repository. If the saved directory is missing, restore it
+before retrying; the bot does not create a replacement or discard existing work.
+
 Edits to existing comments and PR review comments are not supported. Closing the
 issue or closing/merging the PR blocks further rounds.
 

@@ -366,6 +366,11 @@ can reconcile a previously lost merge response.
 
 Follow-up rounds reset analysis, question, current session, checks, and commit;
 they retain the branch, worktree, pinned base, and previous session reference.
+Preparation reuses the saved worktree path rather than deriving a new path from
+the branch name. A renamed branch can therefore retain its original directory.
+Preparation, verification, and push all check the managed path, exact Git root,
+branch, and shared repository. A missing checkpoint directory blocks the task
+without creating a replacement worktree.
 They create a new main session, whereas an implementation-question reply resumes
 the current one. Comments received while working stay queued for a later round.
 Feedback after closure can still be queued, but the next round's guards block it.

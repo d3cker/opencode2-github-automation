@@ -8,6 +8,16 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.5
+
+### Fixed
+
+- Reuse the saved worktree path when resuming recovered tasks or processing PR
+  feedback, including after a branch rename. Preserve existing changes and the
+  pinned base while validating the managed directory, Git root, branch, and
+  repository before preparation, verification, and publication. A missing saved
+  worktree blocks recovery instead of creating a replacement.
+
 ## 0.6.4
 
 ### Fixed

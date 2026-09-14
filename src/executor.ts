@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode/plugin";
 import { execFile } from "node:child_process";
 import { mkdir, realpath, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import type { GithubOptions, Repository } from "./config.js";
 import { botPrompt } from "./prompt.js";
@@ -39,7 +39,9 @@ export class GitWorkspace {
   }
   async prepare(task: Task, repo: Repository) {
     await this.validate(repo);
-    const directory = join(this.stateDirectory, "worktrees", task.branch.replaceAll("/", "-"));
+    // A recovered task can have a renamed branch while retaining its original
+    // worktree. The checkpoint, not the current branch spelling, owns its path.
+    const directory = task.worktree ?? join(this.stateDirectory, "worktrees", task.branch.replaceAll("/", "-"));
     await mkdir(join(this.stateDirectory, "worktrees"), { recursive: true });
     // Existing worktrees are reused only after checking their exact branch and shared repository.
     if (await stat(directory).then(() => true, e => { if (e.code === "ENOENT") return false; throw e; })) {
@@ -47,6 +49,7 @@ export class GitWorkspace {
       const baseSha = task.baseSha ?? await this.git(directory, "merge-base", "HEAD", `refs/remotes/origin/${repo.baseBranch}`);
       return { worktree: await realpath(directory), baseSha };
     }
+    if (task.worktree) throw new Blocked("Saved task worktree is missing; restore it before retrying");
     try { await this.git(repo.directory, "fetch", "origin", `refs/heads/${repo.baseBranch}:refs/remotes/origin/${repo.baseBranch}`); }
     catch (cause) { throw new Error(`Could not fetch base branch ${repo.baseBranch} from origin; check that it exists and Git authentication works`, { cause }); }
     const baseSha = await this.git(repo.directory, "rev-parse", `refs/remotes/origin/${repo.baseBranch}`);
@@ -62,8 +65,11 @@ export class GitWorkspace {
     return result.split(/\r?\n/).some(line => line.split(/\s+/)[1] === ref);
   }
   private async assertWorktree(directory: string, task: Task, repo: Repository) {
-    const expected = join(await realpath(this.stateDirectory), "worktrees", task.branch.replaceAll("/", "-"));
-    if (await realpath(directory) !== resolve(expected)) throw new Blocked("Unexpected worktree path");
+    const managed = join(await realpath(this.stateDirectory), "worktrees");
+    const expected = task.worktree ? resolve(task.worktree) : join(managed, task.branch.replaceAll("/", "-"));
+    const actual = await realpath(directory);
+    if (actual !== expected || dirname(actual) !== managed) throw new Blocked("Unexpected worktree path");
+    if (await realpath(await this.git(directory, "rev-parse", "--show-toplevel")) !== actual) throw new Blocked("Task directory is not the worktree root");
     if (await this.git(directory, "branch", "--show-current") !== task.branch) throw new Blocked("Worktree branch changed");
     const common = await this.git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir");
     const original = await this.git(repo.directory, "rev-parse", "--path-format=absolute", "--git-common-dir");
