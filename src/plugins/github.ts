@@ -10,7 +10,7 @@ import { GithubRpc } from "../rpc.js";
 import { acquire, JsonStore, redact } from "../state.js";
 import { githubToken } from "../easy.js";
 import type { Activity } from "../activity.js";
-import { cleanup, heartbeat, touchOwner } from "../lifecycle.js";
+import { abortable, cleanup, heartbeat, touchOwner } from "../lifecycle.js";
 
 export default Plugin.define({
   id: "automation.github",
@@ -19,7 +19,7 @@ export default Plugin.define({
     if (await realpath(ctx.location.directory) !== await realpath(options.ownerDirectory)) return;
     const token = await githubToken(options.tokenEnv);
     const controller = new AbortController();
-    const release = await acquire(options.stateDirectory, "github", error => controller.abort(error));
+    const release = await acquire(options.stateDirectory, "github", error => controller.abort(error), true);
     const executor = new OpenCodeExecutor(ctx, options, controller.signal);
     let publish: (activity: Activity) => Promise<void> = async () => {};
     const dispatcher = new Dispatcher(options, new JsonStore(join(options.stateDirectory, "queue.json"), Queue, () => ({ version: 1, tasks: [] })), new Github(token, controller.signal, fetch, options.signature), executor, controller.signal, [token], Date.now, activity => publish(activity));
@@ -31,7 +31,7 @@ export default Plugin.define({
       () => { clearInterval(timer); controller.abort(); },
       () => stopHeartbeat?.(),
       () => dispatcher.settle(),
-      () => registration?.dispose(),
+      () => abortable(async () => { await registration?.dispose(); }, AbortSignal.timeout(5_000)),
       () => releaseBridge?.(),
       release,
     );

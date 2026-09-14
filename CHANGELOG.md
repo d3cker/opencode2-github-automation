@@ -8,6 +8,19 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.4
+
+### Fixed
+
+- Prevent hourly owner eviction using durable activity on one empty maintenance
+  session. The previous plugin-list heartbeat did not refresh OpenCode's session
+  inactivity timer. Keepalive never prompts a model or modifies a work session.
+- Bound SDK waits independently of adapters that ignore AbortSignal, allowing
+  shutdown to release locks without interrupting a healthy worktree session.
+  A replacement dispatcher reconciles the saved session before publication.
+- Wait briefly for a retiring owner's locks, bound RPC disposal, and reject
+  queued checkpoint writes after shutdown to prevent failed plugin reloads.
+
 ## 0.6.3
 
 ### Fixed

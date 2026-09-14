@@ -68,16 +68,16 @@ test("uncertain prompt and failed session outcomes block verification", async ()
   messages = [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "error" }];
   await assert.rejects(executor.run(t, async () => {}), /did not complete successfully/);
 });
-test("abort of a running wait interrupts the server session", async () => {
+test("owner disposal releases a wait that ignores cancellation and preserves the worker for reconciliation", async () => {
   let interrupted = false;
   const controller = new AbortController();
   const ctx = { session: {
     get: async () => ({ location: { directory: "/worktree" } }),
-    wait: async () => { controller.abort(); throw new Error("aborted"); },
+    wait: async () => { controller.abort(); return new Promise(() => {}); },
     interrupt: async () => { interrupted = true; },
   } } as unknown as Plugin.Context;
   await assert.rejects(new OpenCodeExecutor(ctx, options, controller.signal, async () => {}).run({ ...task(), sessionID: "ses_test", promptAttempted: true }, async () => {}));
-  assert.equal(interrupted, true);
+  assert.equal(interrupted, false);
 });
 
 test("real git worktree isolates a fix, verifies, commits and pushes to a local bare remote", async () => {
