@@ -8,6 +8,8 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.4
+
 ### Fixed
 
 - Prevent hourly owner eviction using durable activity on one empty maintenance
