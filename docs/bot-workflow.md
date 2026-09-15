@@ -3,29 +3,53 @@
 This document describes the current implementation, including waiting, retries,
 follow-up rounds, and recovery. Mermaid nodes use the actual persisted phase
 and status names where applicable. `done` means publication finished; it does
-not mean the PR has merged.
+not mean the PR has merged. These diagrams describe the code on this branch;
+features under `Unreleased` are available in a build of this branch and enter a
+published package through the release process.
+
+Read the diagrams together: sections 1–3 cover scheduling and admission, section 4
+covers the saved main session, sections 5–7 cover helpers and publication, and
+section 8 covers every recovery entry point. Model planning, subagents and review
+happen inside `running`; they are not additional persisted phases.
 
 ## 1. Startup, ownership, and polling
 
 ```mermaid
 flowchart TD
-    Load[OpenCode loads automation plugin] --> Owner{Primary Git checkout root?}
-    Owner -->|No| Inactive[Plugin stays inactive]
-    Owner -->|Yes| Config[Read explicit plugin options or .opencode/automation.json]
+    Load[Load combined automation plugin] --> Owner{Primary Git checkout root?}
+    Owner -->|No or outside Git| Inactive[Plugin stays inactive]
+    Owner -->|Yes| Config[Use nonempty plugin options or read .opencode/automation.json]
     Config -->|No project config| Inactive
-    Config --> Resolve[Resolve repositories, authentication, routes, and defaults]
-    Resolve --> GH[Start GitHub plugin; acquire github lock; load queue.json]
-    GH --> RPC[Register dispatcher RPC and runtime bridge]
-    RPC --> Worker[Immediate worker tick, then workerEverySeconds]
-    GH --> Scheduler[Start scheduler; acquire scheduler lock; load scheduler.json]
-    Scheduler --> Clock[Immediate tick, then every second]
-    Clock --> Due{Job due and not paused or already running?}
-    Due -->|Yes| ScanRPC[Call automation.github.scan through RPC]
-    ScanRPC --> Save[Save job result and nextAt]
+    Config --> Resolve[Validate settings and resolve GitHub auth, routes and defaults]
+    Resolve --> GH[Acquire github lock and load queue.json]
+    GH --> RPC[Register runtime bridge and dispatcher RPC]
+    RPC --> Worker[Immediate worker tick, then every workerEverySeconds]
+    RPC --> Scheduler[Start scheduler after GitHub setup succeeds]
+    Scheduler --> State[Acquire scheduler lock, load scheduler.json and register RPC]
+    State --> Clock[Immediate scheduler tick, then every second]
+    Clock --> Due{Job due, unpaused and not already running?}
+    Due -->|Yes| Scan[Invoke configured RPC, normally automation.github.scan]
+    Scan --> Save[Persist result, failures and nextAt]
     Save --> Clock
     Due -->|No| Clock
-    Worker --> Dispatch[Advance one eligible task or check merges]
+    Worker --> Recover[Probe eligible stopped sessions and recover unpublished questions]
+    Recover --> Round[Promote one done task with pending feedback to a new round]
+    Round --> Select[Choose ready or retry_wait task, saved running session first]
+    Select --> Candidate{Candidate exists?}
+    Candidate -->|No| Merge[Check eligible merges]
+    Candidate -->|Yes| TaskDue{Candidate nextAt elapsed?}
+    TaskDue -->|No| Worker
+    TaskDue -->|Yes| Dispatch[Advance saved phase]
     Dispatch --> Worker
+    Merge --> Worker
+    RPC -.-> Keepalive[Each component touches the same empty owner session every ten minutes]
+    State -.-> Keepalive
+    Keepalive --> PID{Registered service PID matches this process?}
+    PID -->|Yes| Touch[Create or reuse maintenance session, then emit rename event]
+    PID -->|No| Skip[Skip keepalive]
+    Stop[Owner reload or shutdown] --> Cleanup[Stop timers and local waits, settle writes, dispose RPC, release locks]
+    Cleanup --> Preserve[Preserve durable queue and healthy worktree execution]
+    Preserve --> Load
 ```
 
 - Easy configuration puts state under the shared Git directory at
@@ -54,33 +78,37 @@ flowchart TD
 
 Sources: [index.ts](../src/index.ts), [easy.ts](../src/easy.ts),
 [GitHub plugin](../src/plugins/github.ts),
-[scheduler plugin](../src/plugins/scheduler.ts), [state.ts](../src/state.ts).
+[scheduler plugin](../src/plugins/scheduler.ts), [lifecycle.ts](../src/lifecycle.ts),
+[dispatcher.ts — workOnce](../src/dispatcher.ts), [state.ts](../src/state.ts).
 
 ## 2. Discovery and routing
 
 ```mermaid
 flowchart TD
-    Scan[Scan each configured repository] --> PRs[Refresh tracked PR states, including closed issues]
-    PRs --> Issues[List open issues; fetch tracked issues missing from that list]
-    Issues --> IsPR{Entry is a pull request?}
-    IsPR -->|Yes| Ignore[Ignore entry]
-    IsPR -->|No| Comments[Read issue comments and filter authorized comments]
+    Scan[Scan each configured repository] --> PRs[Refresh tracked PRs not already marked merged]
+    PRs --> Issues[List open issues and fetch missing tracked issues]
+    Issues --> Skip{PR entry or closed untracked issue?}
+    Skip -->|Yes| Ignore[Ignore entry]
+    Skip -->|No| Comments[Read comments and filter authorized human comments without bot markers]
     Comments --> Tracked{Task already exists?}
-    Tracked -->|Yes| Answer{Pending published question and eligible reply?}
-    Answer -->|Yes| Accept[Save first eligible reply; waiting becomes ready]
-    Answer -->|No| Feedback[Append fresh comments to pendingFeedback]
-    Accept --> Feedback
-    Feedback --> Cursor[Persist comment cursor and queue]
-    Tracked -->|No| Open{Issue open?}
-    Open -->|No| Ignore
-    Open -->|Yes| Body[Match route in body if issue author is authorized]
-    Body --> Found{Route found?}
-    Found -->|No| CommentRoute[Look for a route in authorized comments]
-    Found -->|Yes| Queue[Persist queued / ready task]
-    CommentRoute -->|Route found| Queue
-    CommentRoute -->|No route| Ignore
-    Body -->|Multiple matching tags in one body| Block[Persist queued / blocked task]
-    CommentRoute -->|Multiple matching tags in one comment| Block
+    Tracked -->|Yes| Answer{Open issue with unanswered published question and eligible reply?}
+    Answer -->|Yes| Accept[Save first eligible answer and any permission decision]
+    Accept --> Ready[Only waiting status becomes ready]
+    Ready --> Remaining[Remove answer from fresh and previously queued feedback]
+    Answer -->|No| Feedback[Append remaining fresh comments to pendingFeedback]
+    Remaining --> Feedback
+    Feedback --> Cursor[Persist cursor from all observed comments and save queue]
+    Cursor --> Gate{Task done?}
+    Gate -->|Yes| Later[Next available worker pass may start a follow-up round]
+    Gate -->|No| Retain[Keep feedback until current round publishes]
+    Tracked -->|No| Body[Match body route only for an authorized issue author]
+    Body --> Found{Body route found?}
+    Found -->|Yes| Queue[Persist queued / ready with initial authorized feedback]
+    Found -->|No| Route[Try authorized comments, keeping the last matching route]
+    Route -->|Route found| Queue
+    Route -->|No route| Ignore
+    Body -->|Multiple matching tags| Block[Persist queued / blocked task]
+    Route -->|Multiple matching tags| Block
 ```
 
 Authorized comment filtering requires an author in the configured allowlist
@@ -100,6 +128,13 @@ SHA-256 of that key. Initial feedback contains the authorized comments already
 seen. Later comments are tracked by increasing comment ID; edits do not create
 new feedback. PR review comments do not drive implementation rounds.
 
+Discovery and execution are separate: saving `pendingFeedback` does not itself
+clear a blocked task or interrupt its current session. Only `done` tasks start a
+new round. A session-stop block can first reconcile successful manual continuation
+as described in section 8. A pending question consumes its first eligible reply
+instead of also treating that reply as follow-up work. The comment cursor includes
+all observed comments, while only authorized, unmarked comments become inputs.
+
 Source: [dispatcher.ts — scanOnce](../src/dispatcher.ts),
 [config.ts — matchRoute](../src/config.ts).
 
@@ -107,30 +142,38 @@ Source: [dispatcher.ts — scanOnce](../src/dispatcher.ts),
 
 ```mermaid
 flowchart TD
-    Q[queued / ready] --> Guard[Re-fetch issue; validate route, authorization, and follow-up PR]
-    Guard --> A[analyzing: generate structured decision without tools]
+    Q[queued / ready] --> Guard[Re-fetch issue and validate route, authorization and follow-up PR]
+    Guard --> A[analyzing: generate or reuse structured decision without tools]
     A --> Decision{Decision kind?}
-    Decision -->|question| AQ[Persist proposals and question; publish one signed comment]
+    Decision -->|question| AQ[Persist proposals and question, publish one signed comment]
     AQ --> AW[analyzing / waiting]
-    AW -->|Authorized issue reply| Dialogue[Save dialogue; clear previous decision]
+    AW -->|Authorized reply| Dialogue[Save dialogue and invalidate prior decision]
     Dialogue --> Guard
     Decision -->|proceed| Ack[Publish or reconcile signed analysis acknowledgement]
-    Ack --> C[commented: confirmed commentID]
+    Ack --> C[commented with confirmed commentID]
     C --> Pinned{Base already pinned?}
     Pinned -->|No| Base[Interpret authorized branch discussion with main model]
-    Base --> Choice{Unambiguous valid selection?}
-    Choice -->|No or selected branch absent on origin| BQ[Publish base question; commented / waiting]
+    Base --> Choice{Valid unambiguous branch exists on origin?}
+    Choice -->|No| BQ[Publish base question, commented / waiting]
     BQ -->|Authorized reply| Base
     Choice -->|Yes| Pin[Persist baseBranch]
-    Pinned -->|Yes| Prepare[Validate repository; create or reuse isolated worktree]
+    Pinned -->|Yes| Prepare[Validate repository and reuse saved worktree or create a new one]
     Pin --> Prepare
-    Prepare --> R[running: checkpoint workspace and execute OpenCode session]
+    Prepare --> R[running: save workspace, install runtime and execute saved session]
     R -->|Question| RW[running / waiting]
     RW -->|Authorized reply| R
-    R -->|Successful session with no pending question| V[verifying: checks and commit]
-    V --> P[publishing: reconcile PR, title if needed, push and create PR]
-    P --> Done[pr_opened / done: save PR and publishedAt]
-    Done -->|New authorized issue feedback| Round[Increment round; queue feedback; reset per-round execution state]
+    R -->|Timeout or unsuccessful final result| Stopped[running / blocked with sessionStopped]
+    Stopped -->|Manual continuation succeeds and probe passes| R
+    Stopped -->|Explicit restartworkflow| Recover[Persist recovery intent, rejoin the same session]
+    Recover --> R
+    R -->|Validated success, no unresolved question| V[verifying: configured checks and commit]
+    V --> P[publishing: reconcile or create PR, push when required]
+    V -->|Failed check or Git consistency guard| VB[verifying / blocked]
+    VB -->|Operator retries saved stage| V
+    P --> Done[pr_opened / done with PR and publishedAt]
+    P -->|Publication failure| PB[Retain publishing phase and apply error policy]
+    PB -->|Eligible retry| P
+    Done -->|Pending authorized feedback| Round[Increment round, move feedback and reset per-round state]
     Round --> Q
 ```
 
@@ -160,9 +203,18 @@ the base stays pinned across retries and rounds; later comments do not rebase wo
 Preparation validates the checkout root, `origin` repository, and branch name.
 A new worktree is created from the fetched base commit under
 `stateDirectory/worktrees/BRANCH-WITH-SLASHES-REPLACED-BY-DASHES`.
-An existing worktree must have the expected real path, branch, and shared Git
-directory. A branch already existing without its expected worktree blocks work.
-The worker runtime is installed before execution.
+For a saved `worktree`, preparation uses that exact path even if the branch was
+renamed during recovery. Its canonical directory must be a direct child of the
+managed worktree folder and the exact Git worktree root, with the expected branch
+and shared Git directory. Its pinned `baseSha` is retained. A missing saved path,
+or a branch already existing without its expected worktree, blocks work rather
+than creating a replacement. The worker runtime is installed before execution.
+
+Failures retain their current phase. A stopped `running` session can return to
+that phase through automatic reconciliation or explicit workflow recovery; neither
+path skips the session checks or jumps straight to `done`. Recovery of `verifying`
+or `publishing` retries that saved stage. The full error and command rules are in
+section 8.
 
 Sources: [dispatcher.ts — workOnce, resolveAnalysis, resolveBase](../src/dispatcher.ts),
 [executor.ts — analyze, selectBase, GitWorkspace.prepare](../src/executor.ts),
@@ -173,32 +225,60 @@ Sources: [dispatcher.ts — workOnce, resolveAnalysis, resolveBase](../src/dispa
 ```mermaid
 sequenceDiagram
     participant D as Dispatcher / executor
-    participant S as OpenCode main session
+    participant S as Saved OpenCode main session
     participant R as Worker runtime
     participant G as GitHub issue
-    participant U as Authorized user
-    D->>D: Save sessionID before session creation
+    participant U as Authorized user / operator
+    opt No saved session ID
+        D->>D: Persist sessionID before contacting OpenCode
+    end
     D->>S: Get session, create only on explicit not-found
-    D->>D: Validate worktree location, save sessionReady
-    D->>D: Save promptAttempted before sending initial prompt
-    D->>S: Implement agreed scope in task worktree
+    D->>D: Validate worktree location and save sessionReady
+    opt Initial prompt not attempted
+        D->>D: Persist promptAttempted
+        D->>S: Implement agreed scope with task marker
+    end
+    opt Explicit recovery queued, continuation not attempted
+        D->>S: Wait until current execution is idle
+        D->>S: Read saved outcome
+        alt Outcome is not succeeded
+            D->>S: Confirm original task marker in context
+            D->>D: Persist recovery.attempted before sending
+            D->>S: Continue same task with recovery marker and deterministic message ID
+        else Already succeeded
+            Note over D,S: Do not send another continuation
+        end
+    end
     D->>S: Wait for completion
     opt Clarification or permission required
         S->>R: ask_issue / intercepted question / permission ask
-        R->>D: Register question against main task session
+        R->>D: Register against main task session
         D->>D: Persist pending question
         D->>G: Publish signed question with stable marker
         R-->>S: Stop work and finish turn
-        D->>D: Preserve running phase, set waiting status
+        D->>D: Preserve running phase, set waiting
         U->>G: Reply in the same issue
-        D->>G: Next scan reads eligible reply
-        D->>D: Persist answer, set ready
-        D->>S: Resume same main session with deterministic answer message ID
+        D->>G: Scan reads eligible answer
+        D->>D: Persist answer and set ready
+        D->>S: Resume same session with deterministic answer message ID
         D->>S: Wait for completion
     end
-    D->>S: Read context and final outcome
-    D->>D: Confirm initial prompt marker and successful final assistant message
-    D->>D: Advance to verifying
+    alt Owner is disposed
+        Note over D,S: Release local wait without interrupting healthy execution
+        Note over D: Replacement owner loads queue and rejoins saved session
+    else Session deadline expires
+        D->>S: Interrupt execution
+        D->>D: Save running / blocked with sessionStopped
+    else Wait completes
+        D->>S: Read context and final outcome
+        alt Valid task marker, admitted recovery marker if required, and successful final assistant
+            D->>D: Clear recovery state and advance to verifying
+        else Unsuccessful final outcome or assistant
+            D->>D: Save session-stop block for later reconciliation
+        else Missing marker or wrong location
+            D->>D: Block for inspection, no automatic prompt replay
+        end
+    end
 ```
 
 - A saved `sessionID` is reused after transport failure. A network error when
@@ -233,35 +313,61 @@ sequenceDiagram
   uses a deterministic message ID for retry reconciliation.
 - A pending question prevents verification and PR publication. Waiting tasks
   release worker selection so other queued tasks can proceed.
-- A timed-out wait interrupts the server session and blocks for inspection.
-  Uncertain initial prompt delivery, a wrong session location, or a final outcome
-  other than `succeeded` with a non-error assistant `finish: stop` also blocks.
+- A session wait deadline attempts to interrupt the server session and records
+  a `SessionStopped` block. A final outcome other than `succeeded`, a missing final
+  assistant, an assistant error, or a finish other than `stop` also records a
+  session stop. A successful manual continuation can be discovered automatically.
+- Explicit workflow recovery waits for existing execution before deciding whether
+  to send a continuation. It sends nothing if the saved outcome is already
+  `succeeded`; normal final-message validation still applies. Otherwise it checks
+  the original task marker, persists `recovery.attempted`, and sends the recovery
+  marker with a deterministic message ID. A later retry never blindly resends
+  that attempted prompt. Missing recovery evidence blocks for inspection.
+- Wrong session location and uncertain original prompt delivery are ordinary
+  `Blocked` errors, not session-stop eligibility. A pending question still prevents
+  publication. Successful execution clears `sessionStopped` and `recovery` as the
+  dispatcher advances to `verifying`.
 
 Sources: [executor.ts — runSession](../src/executor.ts),
 [runtime.ts](../src/runtime.ts), [prompt.ts](../src/prompt.ts),
-[dispatcher.ts — question, publishQuestion](../src/dispatcher.ts).
+[dispatcher.ts — workOnce, question, publishQuestion, restartWorkflow](../src/dispatcher.ts).
 
 ## 5. Optional media inspection
 
 ```mermaid
-flowchart LR
-    Call[Main session calls inspect_media] --> Cap{Main model supports requested input?}
-    Cap -->|Yes| Main[Use same model in separate helper session]
+flowchart TD
+    Call[inspect_media request] --> MainTask{Owning main task has route and worktree?}
+    MainTask -->|No| Error[Return tool error]
+    MainTask -->|Yes| Cap{Main model supports requested vision or audio input?}
+    Cap -->|Yes| Main[Select main model for a separate helper session]
     Cap -->|No| Other{Configured mediaModel supports input?}
-    Other -->|Yes| Helper[Use configured helper model]
-    Other -->|No| Ask[Ask in issue for configuration update or text description; wait]
-    Main --> Files[Validate HTTPS URLs or files inside worktree]
+    Other -->|Yes| Helper[Select configured helper model]
+    Other -->|No| Ask[Post issue question for configuration or text description and wait]
+    Main --> Files[Validate 1 to 8 HTTPS URLs or real files inside worktree]
     Helper --> Files
-    Files --> Session[Persist helper ID; create or reuse read-only session]
-    Session --> Result[Send attachments; wait; validate completed answer]
-    Result --> Return[Return findings to main session; main model stays unchanged]
+    Files -->|Invalid input| Error
+    Files --> Guard{Task running with no unresolved question?}
+    Guard -->|No| Error
+    Guard -->|Yes| ID[Persist deterministic helper ID for main session and tool call]
+    ID --> Session[Get saved helper or create only on explicit not-found]
+    Session --> Prompt[Send deterministic attachment prompt, hooks disable all tools]
+    Prompt --> Wait[Wait with session deadline]
+    Wait -->|Timeout| Interrupt[Attempt helper interruption and return error]
+    Wait -->|Other failure| Error
+    Wait -->|Completed| Result{Succeeded outcome and non-error final assistant with finish stop?}
+    Result -->|No| Error
+    Result -->|Yes| Return[Return findings to main session, keep main model unchanged]
 ```
 
-Only the active main bot session can delegate media. Helpers have no tools.
+Only the owning main bot session can delegate media; the helper-registration
+step also requires `running` with no unresolved question. Helpers have no tools.
 URLs cannot contain credentials; local paths are resolved and must remain inside
 the worktree. GitHub credentials are not forwarded to media URLs. A helper uses
 stable session and prompt IDs for a given call. Helper failures return errors;
-a helper timeout attempts interruption.
+a helper timeout attempts interruption. Native implementation subagents are a
+separate mechanism: they may use permitted tools, while their questions route back
+to the main task through parent-session lookup. Neither kind of helper creates
+another dispatcher round or publishes its own PR.
 
 Source: [runtime.ts — inspect_media](../src/runtime.ts).
 
@@ -269,28 +375,40 @@ Source: [runtime.ts — inspect_media](../src/runtime.ts).
 
 ```mermaid
 flowchart TD
-    Start[Session completed] --> Identity[Check expected worktree, branch, and shared repository]
+    Start[Validated session success or retry of verifying phase] --> Identity[Require saved workspace and base, exact managed root, branch and shared repository]
     Identity --> Base[Require baseSha ancestor of HEAD and no unresolved conflicts]
-    Base --> Checks[Run configured repository checks sequentially]
-    Checks --> Diff[Recheck worktree identity; git diff --check]
-    Diff --> Stage[git add --all; check staged diff; record staged tree]
+    Base --> Checks[Run configured checks sequentially, or none if list empty]
+    Checks -->|Configured check fails| Block[blocked at saved phase, retain work]
+    Checks -->|Pass| Diff[Recheck identity and git diff --check]
+    Diff --> Stage[git add --all, check staged diff and record staged tree]
     Stage --> Commit[Commit staged changes if any]
-    Commit --> Validate[Require committed tree equals recorded tree, changes versus base, and clean worktree]
-    Validate --> Save[Save checks and exact commit SHA; phase publishing]
-    Save --> Find[Find existing PR for task branch, including closed PRs]
+    Commit --> Validate[Require committed tree matches, changes versus base and clean worktree]
+    Identity -->|Explicit consistency guard fails| Block
+    Base -->|Unresolved conflicts| Block
+    Validate -->|Explicit consistency guard fails| Block
+    Validate -->|Pass| Save[Persist checks and exact commit SHA, phase publishing]
+    Retry[Retry saved publishing phase] --> Find
+    Save --> Find[Find branch PR including closed PRs]
     Find --> Follow{Follow-up round?}
     Follow -->|Yes| Open{Existing PR open?}
-    Open -->|No| Block[Block; retain changes in worktree]
-    Open -->|Yes| Push[Validate origin and worktree; require saved HEAD and clean tree; push exact SHA]
+    Open -->|No| Block
+    Open -->|Yes| Push[Validate origin, workspace, saved HEAD and clean tree, push exact SHA]
     Follow -->|No| Exists{PR already exists?}
-    Exists -->|Yes| Done[Save PR and publication time; pr_opened / done]
-    Exists -->|No| Title[Generate and persist descriptive English PR title]
-    Title --> Issue[Require issue still open]
-    Issue --> PushNew[Validate origin and worktree; push exact verified SHA]
-    PushNew --> Create[Create or reconcile signed PR targeting pinned base]
+    Exists -->|Yes| Done[Record PR and publication time, pr_opened / done]
+    Exists -->|No| Title[Generate title only if no saved prTitle]
+    Title --> Issue{Issue still open?}
+    Issue -->|No| Block
+    Issue -->|Yes| PushNew[Validate origin and workspace, push exact verified SHA]
+    PushNew --> Create[Create or reconcile signed PR against pinned base]
     Create --> Done
     Push --> Done
+    Failure[Other command, model or transport error] --> Policy[Keep current phase and apply retry policy in section 8]
 ```
+
+Resuming `running` validates the saved session first; retrying `verifying` runs
+checks again. Retrying `publishing` uses the saved verified SHA and requires the
+worktree still to match it, rather than rerunning checks implicitly. An already
+pushed branch does not by itself make a task complete.
 
 The configured checks are command argument arrays. A failing configured check
 produces `blocked`. With no configured checks, only Git consistency checks run;
@@ -316,30 +434,41 @@ Sources: [executor.ts — GitWorkspace.verify, push, title](../src/executor.ts),
 
 ```mermaid
 flowchart TD
-    Done[pr_opened / done] --> Feedback{Pending issue feedback?}
-    Feedback -->|Yes| Round[Next worker pass starts new round on same branch and worktree]
-    Round --> Guard[Require open issue and open original PR; analyze and acknowledge again]
-    Feedback -->|No| Idle{No eligible execution task selected?}
-    Idle -->|No| Later[Wait for a later worker pass]
-    Idle -->|Yes| Enabled{Auto-merge enabled and task eligible?}
-    Enabled -->|No| Later
-    Enabled -->|Yes| Scan[Scan again before considering merge]
-    Scan --> Fresh{New feedback or closed PR?}
+    Pending[Authorized comment enters pendingFeedback] --> Done{Current task done?}
+    Done -->|No| Keep[Retain comment while running, waiting or blocked]
+    Keep --> Recovery[Session recovery and publication must finish first]
+    Recovery --> Done
+    Done -->|Yes| Round[Next worker pass starts one new round on saved branch and worktree]
+    Round --> Guard[Require open issue, open original PR and authorized feedback, then analyze again]
+    Idle[Worker has no eligible execution task] --> Eligible{Auto-merge enabled and done task eligible?}
+    Eligible -->|No| Later[Wait for a later worker pass]
+    Eligible -->|Yes| Since{publishedAt exists?}
+    Since -->|No| Window[Record current time as fresh approval window]
+    Window --> Later
+    Since -->|Yes| Scan[Scan again before considering merge]
+    Scan --> Fresh{Pending feedback or closed PR?}
     Fresh -->|Yes| Later
-    Fresh -->|No| Head[Require open non-draft PR with published commit as current head]
-    Head --> Review[Evaluate latest decisive reviews and configured approval comments]
-    Review --> Changes{Any outstanding changes-requested review?}
-    Changes -->|Yes| Later
-    Changes -->|No| Author{Eligible approver in allowlist with write, maintain, or admin permission?}
-    Author -->|No| Later
+    Fresh -->|No| Detail[Read GitHub PR details]
+    Detail --> Already{Already merged?}
+    Already -->|Yes| Ack[Post or reconcile signed merge acknowledgement, persist merged and closed PR]
+    Already -->|No| Head{Open, non-draft PR with saved verified head?}
+    Head -->|No| Poll[Clear mergeError, set mergeNextAt at least 60 seconds later]
+    Head -->|Yes| Review[Evaluate latest decisive reviews and exact approval comments]
+    Review --> Author{No outstanding changes request and eligible approver has write, maintain or admin access?}
+    Author -->|No| Poll
     Author -->|Yes| Ready{mergeable and mergeable_state clean?}
-    Ready -->|No| Retry[Record mergeError; retry no sooner than 60 seconds]
+    Ready -->|No| Error[Record mergeError and delayed retry, preserve task status]
     Ready -->|Yes| Merge[Request GitHub merge with exact SHA and configured method]
-    Merge --> Ack[Post signed merged acknowledgement; persist merged and closed PR]
-    Manual[Manual PR close or merge] --> Poll[Next repository scan refreshes PR state]
-    Ack --> UI[TUI receives activity or recovers it by polling]
-    Poll --> UI
-    UI --> Tabs[Close known task and helper tabs when idle; preserve session history]
+    Merge -->|Merged| Ack
+    Merge -->|Rejected or request fails| Error
+    Poll --> Later
+    Error --> Later
+    Manual[Manual PR close or merge] --> Refresh[Repository scan refreshes tracked PR state]
+    Ack --> UI[Activity events and TUI polling every 10 seconds]
+    Refresh --> UI
+    UI --> Busy{Associated tab busy?}
+    Busy -->|Yes| Defer[Retry closure on a later snapshot]
+    Busy -->|No| Tabs[Close known task and helper tabs once, preserve sessions and worktrees]
 ```
 
 Merge eligibility requires `done`, a tracked nonclosed PR, a saved commit, no
@@ -360,24 +489,30 @@ The permission check then requires an allowlisted candidate with repository writ
 maintain, or admin access. GitHub still enforces merge requirements.
 
 Every successful round updates `publishedAt`, so old approvals cannot authorize
-the next published round. A false merge result schedules another check after
-60 seconds; errors also respect GitHub retry timing. An already-merged response
-can reconcile a previously lost merge response.
+the next published round. When the approval method returns false (for example,
+no eligible approval or a mismatched head), the dispatcher clears `mergeError` and schedules another check
+after 60 seconds. An approved PR that GitHub says is not ready, a rejected merge,
+or a request failure records `mergeError`; error retries also respect GitHub timing.
+An already-merged response can reconcile a previously lost merge response.
 
-Follow-up rounds reset analysis, question, current session, checks, and commit;
-they retain the branch, worktree, pinned base, and previous session reference.
+Follow-up rounds reset analysis, question, current session, session-stop/recovery
+state, checks, and commit; they retain the branch, worktree, pinned base, and previous session reference.
 Preparation reuses the saved worktree path rather than deriving a new path from
 the branch name. A renamed branch can therefore retain its original directory.
 Preparation, verification, and push all check the managed path, exact Git root,
 branch, and shared repository. A missing checkpoint directory blocks the task
 without creating a replacement worktree.
-They create a new main session, whereas an implementation-question reply resumes
-the current one. Comments received while working stay queued for a later round.
+A follow-up creates a new main session, whereas an implementation-question reply
+or workflow recovery retains the current one. Comments received while working,
+waiting or blocked stay queued until publication of the current round completes.
 Feedback after closure can still be queued, but the next round's guards block it.
 
 PR-state scanning is independent of auto-merge and issue openness. The TUI
 subscribes to activity and polls every 10 seconds, including recovery on startup.
-It opens background task tabs when enabled and exposes `/bot` for session access.
+It opens background task tabs when enabled and exposes `/bot` for session access
+and `/restartworkflow` for operator recovery in the owner project. Commands use
+owner-scoped RPC; they are not GitHub comment commands. Activity phases `merged`
+and `pr_closed` are display values, not new persisted execution phases.
 Closure cleanup includes known earlier-round sessions and media helpers. Busy
 tabs wait until idle; cleanup does not delete sessions, interrupt work, or remove
 worktrees. A manually reopened tab is not repeatedly closed in the same TUI instance.
@@ -396,24 +531,41 @@ An error normally preserves the phase so retry continues from its checkpoint.
 | `ready` | Eligible for worker selection when due. |
 | `waiting` | Awaiting an issue answer; no implementation or publication while unresolved. |
 | `retry_wait` | Transient failure; automatic retry after `nextAt`. |
-| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection and manual retry. |
-| `failed` | Other errors reached `maxAttempts`; manual retry required. |
+| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
+| `failed` | Other errors reached `maxAttempts`; operator recovery/retry required unless the checkpoint also qualifies as a stopped-session recovery candidate. |
 | `done` | PR publication/reconciliation completed; feedback and merge monitoring remain possible. |
 
 ```mermaid
-flowchart LR
-    Work[Current phase] --> Error{Result?}
-    Error -->|WaitingForAnswer| Wait[waiting, or ready if answer already arrived]
-    Error -->|Blocked or GitHub 401 / 404 / 422| Block[blocked]
-    Error -->|Other failure below attempt limit| Retry[retry_wait; preserve phase]
+flowchart TD
+    Work[Execute saved phase] --> Result{Result?}
+    Result -->|WaitingForAnswer| Wait[waiting, or ready if answer already arrived]
+    Result -->|SessionStopped| Stop[running / blocked, sessionStopped true]
+    Result -->|Other Blocked or GitHub 401, 404, 422| Block[blocked at saved phase]
+    Result -->|Other failure below attempt limit| Retry[retry_wait at saved phase]
     Retry -->|nextAt elapsed| Work
-    Error -->|Other failure at attempt limit| Fail[failed]
-    Block --> Manual[Manual retry while worker idle]
+    Result -->|Other failure at limit| Fail[failed at saved phase]
+    Stop --> Probe[On available worker pass, probe due saved session without unresolved question]
+    Legacy[Recognized legacy timeout or outcome block] --> Probe
+    Probe --> Complete{Matching location and task marker, succeeded outcome and valid final assistant?}
+    Complete -->|Yes| Rejoin[ready at running, run full session validation again]
+    Rejoin --> Work
+    Complete -->|No or probe fails| Retain[Retain block and feedback, probe no sooner than 30 seconds later]
+    Retain --> Probe
+    Command[Operator uses restartworkflow] --> Guards{Known task, no unresolved question and no closed or merged PR?}
+    Guards -->|No| Reject[Return actionable error, preserve checkpoint]
+    Guards -->|Yes| Eligible{Status blocked or failed?}
+    Eligible -->|No| Noop[accepted false, do not duplicate scheduled or completed work]
+    Eligible -->|Yes| Safe{Route exists, and running phase is a recognized session stop?}
+    Safe -->|No| Reject
+    Safe -->|Yes| Recover[Persist recovery ID for running phase, clear error and attempts, ready at saved phase]
+    Recover --> Work
+    Block --> Manual[Operator uses retry while worker and maintenance idle]
+    Stop --> Manual
     Fail --> Manual
     Manual --> Restart{restartSession requested?}
-    Restart -->|No| Reset[Clear error and attempts; ready at saved phase]
-    Restart -->|Yes| Cancel[Interrupt old session; clear session ID and prompt flag]
-    Cancel --> Earlier[Return to commented if acknowledgement exists, otherwise queued]
+    Restart -->|No| Reset[Clear error and attempts, ready at saved phase]
+    Restart -->|Yes| Cancel[Interrupt old session, clear sessionID and promptAttempted]
+    Cancel --> Earlier[Return to commented if commentID exists, otherwise queued]
     Earlier --> Reset
     Reset --> Work
 ```
@@ -432,10 +584,55 @@ flowchart LR
 - `retry` accepts only blocked or failed tasks and is rejected while the worker
   or maintenance is busy. `restartSession` does not delete the worktree or changes;
   it restarts session execution from the appropriate earlier phase.
+- Automatic probes select only `running` tasks with a saved session, status
+  `blocked` or `failed`, a recognized session stop, elapsed `nextAt`, and no
+  unresolved question. Probes run when the worker can begin another pass, not
+  concurrently with an already-running worker invocation. An unsuccessful probe
+  delays the next one by at least 30 seconds. Successful saved sessions re-enter
+  `running` validation, then configured checks and publication. This recognizes legacy
+  timeout/outcome errors as well as the persisted `sessionStopped` classification.
+  It never infers success from a clean worktree or an already-pushed commit.
+- `/restartworkflow` queues a durable recovery request for a stopped task without
+  resetting its phase, worktree, branch, PR, or feedback. It can be queued while
+  another task works. For a stopped execution, the executor waits for idleness,
+  verifies the original task marker, and sends a checkpointed continuation only
+  if still incomplete. A lost response never replays that prompt blindly. Admission
+  does not interrupt active sessions; normal session deadlines still apply.
+  Unresolved questions and unsafe errors remain blocked. A missing task, pending question, or closed/merged PR produces an error
+  before the status check. Other statuses return `accepted: false`; this means no
+  recovery was queued, not that a running session was stopped. Eligible tasks need
+  a route, and `running` additionally needs a recognized session-stop checkpoint.
 - Merge errors use `mergeError` and `mergeNextAt`; they do not turn a published
   task into an implementation failure.
 - Reloading the owner project after restart restores polling from durable state.
   Activity events are notifications, not the durable queue.
 
-Sources: [dispatcher.ts — workOnce, retryOnce](../src/dispatcher.ts),
+Sources: [dispatcher.ts — workOnce, restartWorkflow, retryOnce](../src/dispatcher.ts),
 [scheduler.ts](../src/scheduler.ts), [state.ts](../src/state.ts).
+
+### Recovery commands and checkpoints
+
+Run CLI commands from the primary owner checkout, not a task worktree.
+`restartworkflow` changes dispatcher state; it does not restart the OpenCode
+service, resume a paused scheduler, or perform a scan itself.
+
+| Action | Saved phase and session | Effect |
+| --- | --- | --- |
+| Continue a stopped session in the TUI | Same session, `running` phase | Once successful and recognized by the probe, normal session validation, checks and publication resume automatically. |
+| `/restartworkflow`, then select an issue | Same phase, session, worktree, branch and PR | Queue recovery for an eligible blocked/failed task. A stopped session may receive one continuation; verification/publication retries its saved stage. |
+| `opencode2-automation restartworkflow 'owner/repository#123'` | Same as the TUI command | Calls `automation.github.restartworkflow` with `{ key }`, returning `{ accepted }`. |
+| `opencode2-automation retry 'owner/repository#123'` | Same saved phase and session | Clear blocked/failed status while worker and maintenance are idle; it does not send a continuation merely because a session was stopped. |
+| `opencode2-automation retry 'owner/repository#123' --restart-session` | Earlier phase, new session identity on execution | Interrupt the old session and clear its ID and initial-prompt flag; preserve the worktree. Use after inspecting uncertain delivery, not as a routine publication shortcut. |
+| `opencode2-automation resume` | No task checkpoint reset | Unpause the scheduler; accepted task execution has its own loop. |
+| Restart service, then activate the owner | Reload durable state | Restore polling and worker selection; preserve unresolved questions and nonrecoverable blocks. |
+
+The queue stores `sessionStopped` to distinguish execution stops from other
+blocks. `recovery.id` identifies an explicit continuation request and
+`recovery.attempted` records the decision to send it before calling OpenCode.
+Both are cleared after successful execution and when the next feedback round
+starts. Worktree, branch, pinned base, session history and queued comments remain
+separate durable checkpoints. A failed test is never treated as session success.
+
+Regression evidence: [core.test.ts](../test/core.test.ts),
+[executor.test.ts](../test/executor.test.ts), [runtime.test.ts](../test/runtime.test.ts),
+[lifecycle.test.ts](../test/lifecycle.test.ts), [ui.test.ts](../test/ui.test.ts).

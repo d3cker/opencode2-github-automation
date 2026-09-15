@@ -59,14 +59,18 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 | `systemPromptFile` | Optional Markdown instructions appended to the bundled bot prompt; path relative to the primary checkout, or absolute. |
 | `trigger` | Mention that starts work; defaults to `@opencodebot`. |
 | `everySeconds` | Polling interval; defaults to 60 seconds. |
-| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
+| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. If omitted, detect a package test script and its package manager; fail setup if no test command is found. |
 | `authors` | GitHub usernames allowed to request work and authorize merging (merge also requires repository write access). |
 | `signature` | Signature appended to every posted comment and PR description; defaults to `your-github-login[OpenCode2]`. |
 | `autoMerge` | Automatic merge settings: `enabled` (default `true`), `method` (default `squash`), and exact approval `comments`. |
 
 When tests are skipped, the PR explicitly reports that automated tests were not
 run. Git consistency checks and the requirement for an actual change remain.
-Restart the service while idle after changing configuration.
+Restart the service while idle after changing configuration, then activate each
+owner project again. Recovery commands do not reload configuration or reset a
+pinned base. Session/command deadlines and worker retry limits are advanced
+`GithubOptions`, not fields accepted by the strict easy JSON schema above; see
+[advanced options](advanced.md#options).
 
 For noninteractive setup, use `--yes` to accept defaults for omitted options.
 Provide the model and a test command (or explicitly skip tests):

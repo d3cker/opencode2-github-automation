@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -19,6 +20,9 @@ export function releaseRequest(event, repository) {
   if (event.repository?.full_name !== repository) throw new Error("Release event belongs to another repository.");
   if (event.action === "closed" && event.pull_request?.merged === true && event.pull_request.base?.ref === "release") {
     const pr = event.pull_request;
+    if (pr.head?.ref !== "devel" || pr.head.repo?.full_name !== repository) {
+      throw new Error("Automatic publication requires a same-repository devel-to-release PR.");
+    }
     if (!Number.isSafeInteger(pr.number) || pr.number <= 0 || !/^[a-f0-9]{40}$/.test(pr.merge_commit_sha)) {
       throw new Error("Merged PR must provide its number and merge commit.");
     }
@@ -120,6 +124,49 @@ export async function buildPackage({ cwd, directory, version }) {
   return { archive, checksum };
 }
 
+// Merge the exact published release head, never copy files over newer development.
+// Isolate merge attempts from the publisher checkout; a normal push protects races.
+export async function syncDevel({ cwd, releaseHead }) {
+  const git = gitAt(cwd);
+  const ref = "refs/remotes/origin/devel";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await git("fetch", "origin", "refs/heads/devel:refs/remotes/origin/devel");
+    const before = await git("rev-parse", ref);
+    try {
+      await git("merge-base", "--is-ancestor", releaseHead, before);
+      return { head: before, changed: false };
+    } catch {}
+    const temporary = await mkdtemp(join(tmpdir(), "oc2-sync-devel-"));
+    const checkout = join(temporary, "checkout");
+    let added = false;
+    try {
+      await git("worktree", "add", "--detach", checkout, before);
+      added = true;
+      const merge = gitAt(checkout);
+      try {
+        await merge(...identity, "merge", "--no-edit", releaseHead);
+      } catch {
+        throw new Error("Automatic release-to-devel merge conflicted. Remote devel was not changed. Resolve the conflict on devel, then rerun this Release job; no sync PR is created.");
+      }
+      const head = await merge("rev-parse", "HEAD");
+      try {
+        await merge("push", "origin", "HEAD:refs/heads/devel");
+        return { head, changed: true };
+      } catch (error) {
+        await git("fetch", "origin", "refs/heads/devel:refs/remotes/origin/devel");
+        if (await git("rev-parse", ref) === before) {
+          throw new Error("Automatic devel sync push failed. Check publisher write permission and devel branch rules, then rerun this Release job.", { cause: error });
+        }
+        // A concurrent feature merge won the race. Re-merge its new tip, never force.
+      }
+    } finally {
+      if (added) await git("worktree", "remove", "--force", checkout);
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }
+  throw new Error("devel kept changing during synchronization. Rerun this Release job to retry without rebuilding or bumping the version.");
+}
+
 export async function runRelease({ cwd, repository, event, github, directory, build = buildPackage }) {
   const request = releaseRequest(event, repository);
   const git = gitAt(cwd);
@@ -173,7 +220,8 @@ export async function runRelease({ cwd, repository, event, github, directory, bu
     title: `Release ${tag}`,
     body: `Publish ${tag} to main with all released changes and the updated package download.\n\nRelease: ${published.html_url}\n\n${notes}\nMerge this PR with a merge commit to preserve the long-lived release branch.`,
   });
-  return { tag, pullRequest: pull.html_url };
+  const devel = await syncDevel({ cwd, releaseHead: await git("rev-parse", "HEAD") });
+  return { tag, pullRequest: pull.html_url, devel };
 }
 
 export async function verifyPromotion({ cwd, repository, event, github }) {
@@ -192,7 +240,11 @@ export async function verifyPromotion({ cwd, repository, event, github }) {
   return `Release ${published.tag_name} and README are ready for review.`;
 }
 
-export async function verifyFeature(cwd) {
+export async function verifyFeature(cwd, event, repository) {
+  if (event?.pull_request?.base?.ref === "release" &&
+      (event.pull_request.head?.ref !== "devel" || event.pull_request.head.repo?.full_name !== repository)) {
+    throw new Error("Feature PRs must target devel. Only same-repository devel can target release.");
+  }
   const git = gitAt(cwd);
   const pkg = await manifest(git, "HEAD");
   const version = semver.inc(pkg.version, "patch");
@@ -235,7 +287,8 @@ export function githubClient(repository, token) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv[2] === "verify-feature") {
-      console.log(await verifyFeature(process.cwd()));
+      const event = process.env.GITHUB_EVENT_PATH ? JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8")) : undefined;
+      console.log(await verifyFeature(process.cwd(), event, process.env.GITHUB_REPOSITORY));
     } else {
       const repository = process.env.GITHUB_REPOSITORY;
       if (!repository || !process.env.GH_TOKEN || !process.env.GITHUB_EVENT_PATH) throw new Error("Run this script through GitHub Actions with its repository, token, and event file.");

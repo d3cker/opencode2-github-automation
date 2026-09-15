@@ -698,3 +698,92 @@ test("a failed branch-question post is recovered after restart without another m
   assert.equal(d.status()[0]?.status, "waiting"); assert.equal(d.status()[0]?.question?.commentID, 100);
   assert.equal(selections, 1); assert.equal(posts, 2); assert.ok(!f.events.includes("prepare"));
 });
+
+for (const legacy of [true, false]) {
+  test(`a manually completed stopped session publishes and consumes queued feedback after owner restart (${legacy ? "legacy" : "typed"} checkpoint)`, async () => {
+    const f = fixture();
+    let completed = false, prompts = 0;
+    const ctx = { session: {
+      get: async () => ({ location: { directory: "/worktree" }, outcome: completed ? "succeeded" : "interrupted" }),
+      wait: async () => {},
+      context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+      prompt: async () => { prompts++; },
+    } } as unknown as Plugin.Context;
+    const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+    f.executor.run = executor.run.bind(executor); f.executor.completed = executor.completed.bind(executor);
+    let d = f.make(); await d.init(); await d.scan(); await d.tick();
+    assert.equal(d.status()[0]!.status, "blocked");
+    assert.equal(f.events.includes("push"), false);
+    const saved = d.status()[0]!;
+    if (legacy) {
+      delete f.store.data.tasks[0]!.sessionStopped;
+      f.store.data.tasks[0]!.error = "Error: Session timed out and was interrupted; inspect it before retrying";
+    }
+    f.github.comments = async () => [{ id: 100, body: "Revise the visual design on the existing PR", user: { login: "alice" } }];
+    d = f.make(); await d.init(); await d.scan();
+    assert.equal(d.status()[0]!.pendingFeedback?.[0]?.id, 100);
+    f.advance(); await d.tick(); // A stop alone never resumes the model.
+    assert.equal(prompts, 1); assert.equal(d.status()[0]!.status, "blocked");
+    completed = true; f.advance();
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    d = f.make(); await d.init(); await d.tick();
+    assert.equal(d.status()[0]!.status, "done");
+    assert.equal(d.status()[0]!.sessionID, saved.sessionID);
+    assert.equal(d.status()[0]!.worktree, saved.worktree);
+    assert.equal(d.status()[0]!.branch, saved.branch);
+    assert.equal(prompts, 1);
+    assert.deepEqual(f.events.slice(-3), ["verify", "push", "pr"]);
+    f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+    await d.tick(); await d.tick();
+    assert.equal(d.status()[0]!.round, 2);
+    assert.equal(d.status()[0]!.feedback?.[0]?.id, 100);
+    assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+    assert.equal(d.status()[0]!.branch, saved.branch);
+    assert.equal(d.status()[0]!.pr?.number, 2);
+    assert.equal(prompts, 2); // Exactly one new prompt for the new feedback round.
+    assert.equal(f.events.filter(e => e === "push").length, 2);
+  });
+}
+
+test("automatic session reconciliation never bypasses a failed check or unresolved permission", async () => {
+  const f = fixture();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_saved", promptAttempted: true }); throw new Blocked("Session did not complete successfully; inspect its outcome and permissions"); };
+  f.executor.completed = async () => true;
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.store.data.tasks[0]!.question = { id: "permission", text: "Allow?", sessionID: "ses_saved", permission: { action: "shell", resources: ["deploy"] } };
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]!.status, "blocked");
+  await assert.rejects(d.restartWorkflow("owner/repo#1"), /pending question or permission/);
+  delete f.store.data.tasks[0]!.question;
+  f.executor.run = async () => {};
+  f.executor.verify = async () => { f.events.push("verify"); throw new Blocked("Verification failed: npm test"); };
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]!.phase, "verifying");
+  f.advance(); await d.tick();
+  assert.equal(f.events.filter(e => e === "verify").length, 1);
+  assert.equal(f.events.includes("push"), false);
+  await d.restartWorkflow("owner/repo#1"); await d.tick();
+  assert.equal(f.events.filter(e => e === "verify").length, 2);
+  assert.equal(f.events.includes("push"), false);
+});
+
+test("restartworkflow persists one recovery request without resetting session, worktree, PR, or feedback", async () => {
+  const f = fixture();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_saved", promptAttempted: true }); throw new Blocked("Session did not complete successfully; inspect its outcome and permissions"); };
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const saved = d.status()[0]!;
+  assert.equal(await d.restartWorkflow(saved.key), true);
+  const id = d.status()[0]!.recovery?.id; assert.ok(id);
+  assert.equal(await d.restartWorkflow(saved.key), false);
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  d = f.make(); await d.init();
+  const recovered = d.status()[0]!;
+  for (const key of ["sessionID", "worktree", "branch", "baseSha", "phase", "promptAttempted"] as const) assert.equal(recovered[key], saved[key]);
+  assert.equal(recovered.recovery?.id, id);
+  assert.equal(f.events.includes("cancel"), false);
+  f.executor.run = async task => { assert.equal(task.recovery?.id, id); };
+  await d.tick();
+  assert.equal(d.status()[0]!.status, "done");
+  assert.equal(d.status()[0]!.recovery, undefined);
+  assert.equal(await d.restartWorkflow(saved.key), false);
+});

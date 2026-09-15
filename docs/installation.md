@@ -7,7 +7,9 @@ and troubleshooting.
 The README's package installation command contains the versioned GitHub asset URL
 for the stable release promoted into that branch. After publication, automation
 updates README on `release`; its PR carries the update into `main` when merged.
-While that PR awaits review, `release` contains the newer download link. For
+While that PR awaits review, `release` contains the newer download link. The
+publisher also merges the released version and README into `devel` automatically,
+without waiting for the main PR or creating another PR. For
 upgrades, use that branch's current README rather than a copy from an old archive
 or tag, and keep the same installation prefix. Prereleases do not replace the
 stable link. Maintainer setup and retries are in [Release process](releases.md).
@@ -99,6 +101,11 @@ Use a separate test repository when testing on another machine. Independent
 machines do not share queue ownership and can duplicate work on the same issues.
 This installation procedure does not migrate sessions, queues, or worktrees.
 
-Restart the service only when work is idle. Reopen clients after UI updates.
+Restart the service only when work is idle. Then activate every configured owner
+again as shown in the README. Reopen TUI clients after UI updates to register new
+commands such as `/restartworkflow`; merely reopening an old task tab does not
+reload its client's command registrations. A service restart preserves queue
+blocks and pending questions. Use [workflow recovery](runtime.md#interrupted-sessions-and-workflow-recovery)
+for an execution stop instead of reinstalling or deleting state.
 Do not change an active project's `origin` to switch repositories: clone another
 project and configure it separately.

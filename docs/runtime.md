@@ -142,7 +142,10 @@ The bundled prompt scopes instructions to triage, base selection, implementation
 delegated workers, media helpers, and title generation. Within implementation,
 it asks the agent to inspect the project, use relevant available workflows or
 skills, plan nontrivial work, delegate useful independent subtasks, verify results,
-and review the final diff. Subagents and planning tools must be available in the
+and review the final diff. It also requires every affected description, example
+and workflow diagram to be updated before finishing, with documentation changes
+(or the reason none are needed) identified in the final report. Subagents and
+planning tools must be available in the
 OpenCode environment; the prompt does not install or enable them. Simple tasks
 can stay lightweight, and unavailable delegation falls back to local work.
 
@@ -165,7 +168,9 @@ ignore it locally for machine-specific instructions.
 ## Follow progress and continue work
 
 Starting a session shows a notification and opens a background tab when tabs
-are enabled. Use `/bot` to list tasks and open a session.
+are enabled. In the owner project's TUI, use `/bot` to list tasks and open a
+session, or `/restartworkflow` to select a task for recovery. Reopen TUI clients
+after installing an update that adds or changes commands.
 
 Closing or merging the PR automatically closes its known bot session tabs,
 including earlier rounds and media helpers. This also works for manual GitHub
@@ -175,10 +180,13 @@ work finishes. Session history is preserved, and `/bot` can reopen a session.
 Reopening it manually keeps it open for the current TUI instance. No additional
 configuration is required.
 
-A new comment from an authorized author on a tracked issue starts another round:
-acknowledgement, implementation, and a push to the same open PR. The mention does
-not need to be repeated. Comments received during execution wait for the next
-round. A mention in an authorized comment can also start work on an untracked issue.
+A new comment from an authorized author on a tracked issue is saved as feedback.
+After the current task reaches `done`, the next available worker pass starts a
+new round: analysis and acknowledgement, implementation, checks, and a push to
+the same open PR. The mention does not need to be repeated. Comments received
+during execution, a pending question, or a blocked stage remain queued. Receiving
+one does not itself clear the current block. A mention in an authorized comment
+can also start work on an untracked issue.
 
 Follow-up rounds reuse the worktree path saved in the queue, even if recovery
 renamed its branch. Preparation, verification, and push validate that path as a
@@ -189,7 +197,8 @@ before retrying; the bot does not create a replacement or discard existing work.
 Edits to existing comments and PR review comments are not supported. Closing the
 issue or closing/merging the PR blocks further rounds.
 
-Management commands run from the target repository:
+Management commands run from the primary owner checkout of the target repository,
+not from a bot worktree:
 
 For source installations, replace `"$HOME/.local/bin/opencode2-automation"` with
 `node "$HOME/opencode2-github-automation/dist/setup.js"`.
@@ -200,8 +209,55 @@ cd /absolute/path/to/your-project
 "$HOME/.local/bin/opencode2-automation" scan
 "$HOME/.local/bin/opencode2-automation" pause
 "$HOME/.local/bin/opencode2-automation" resume
+"$HOME/.local/bin/opencode2-automation" restartworkflow 'owner/repository#123'
 ```
 
 Pausing stops scheduled scans; it does not cancel accepted tasks or active sessions.
 Do not run independent bots on two machines against the same issues: they do not
 share queue ownership across machines.
+
+## Interrupted sessions and workflow recovery
+
+If you manually continue a timed-out or interrupted bot session in the TUI,
+the dispatcher detects its successful completion automatically. It rejoins the
+saved execution phase, validates the session result, runs the configured checks,
+and publishes the verified changes to the same branch and PR. Pending authorized
+issue comments remain queued and start the next round after publication. This
+also works after a service restart once the owner is loaded; opening a TUI is
+not required. Only recognized session-stop checkpoints qualify for this automatic
+recovery. Other failures retain their documented retry/inspection requirements.
+
+Use `/restartworkflow` in the owner project's TUI and select the issue to recover
+a stopped workflow. The equivalent terminal command is shown above. For a stopped
+session, recovery waits for any current execution, then continues the previously
+agreed task in that same session if it still needs work. For a verification or
+publication failure, it retries that saved stage. It preserves the worktree,
+branch, session history, pinned base, PR, and queued feedback. Repeated requests
+while recovery is scheduled or running do not start duplicate work.
+
+Recovery does not bypass failing checks, unresolved questions or permissions,
+closed PRs, or uncertain prompt delivery. Answer pending questions in the issue.
+If a check still fails, fix its cause and retry; the plugin will not publish an
+unverified result. A service restart restores the saved state but does not clear
+these blocks. To resume paused issue polling, use `resume` separately.
+
+The CLI response `accepted: true` means recovery was queued, not that execution
+or publication has finished. `accepted: false` means the task was not blocked or
+failed and no duplicate recovery was created. Missing tasks, unresolved questions,
+closed/merged PRs, missing routes, and unsafe running-session errors instead
+produce an actionable error. A recovery request can be queued while another issue
+is working, but it waits for a worker pass before execution.
+
+Use `status` to distinguish `phase` (saved execution step) from `status` (whether
+it may run). Active work is normally `phase: running`, `status: ready`; `done`
+means publication completed, not that the PR merged. `pendingFeedback` contains
+comments awaiting a later round. The TUI's `merged` and `pr_closed` phases are
+presentation values derived from the saved PR state. For detailed selection,
+checkpoint and retry rules, see [workflow section 8](bot-workflow.md#8-status-retries-and-recovery).
+
+`retry` alone clears a block at the saved phase; it does not request a new model
+continuation. `retry --restart-session` interrupts the old session and clears its
+identity, so use it only after inspecting the session and uncertain prompt
+results. `/restartworkflow` retains the session. Neither recovery command replaces
+service startup or scheduler `resume`. The slash command belongs in OpenCode's
+TUI, not in an issue comment.

@@ -84,6 +84,23 @@ export function setupUI(context: Plugin.Context) {
         await context.data.session.sync(activity.sessionID);
         if (!context.ui.tabs.focus(activity.sessionID)) context.ui.router.navigate({ type: "session", sessionID: activity.sessionID });
       },
+    }, {
+      id: "automation.restartworkflow", title: "Bot: restart saved workflow", group: "Bot", palette: true,
+      slash: { name: "restartworkflow" },
+      run: async () => {
+        await sync(true);
+        const rows = [...states.values()].reverse();
+        if (!rows.length) { context.ui.toast.show({ message: "No bot tasks in this project.", variant: "info" }); return; }
+        const key = await context.ui.dialog.select({ title: "Restart workflow — preserve worktree and PR", options: rows.map(a => ({ title: `${a.key} · ${a.status}`, description: a.error ?? `Round ${a.round} · ${a.phase}`, value: a.key })) });
+        if (!key || stopped) return;
+        try {
+          const result = await rpc.restartworkflow({ key }, { location, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) });
+          context.ui.toast.show({ message: result.accepted ? `${key}: recovery queued from the saved stage. Existing work is preserved.` : `${key}: already scheduled, running, or complete. No duplicate recovery started.`, variant: "info", duration: 8000 });
+          await sync(true);
+        } catch (error) {
+          await context.ui.dialog.alert({ title: "Workflow recovery", message: error instanceof Error ? error.message : "Recovery request failed; check the project service and retry." });
+        }
+      },
     }],
     }));
     return null;

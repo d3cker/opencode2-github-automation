@@ -245,3 +245,57 @@ test("the initial coding prompt preserves the confirmed choice and never treats 
   assert.match(prompt, /Heapsort only, with integer input/);
   assert.match(prompt, /publishing proposals alone is never approval/i);
 });
+
+for (const active of [false, true]) {
+  test(`workflow recovery ${active ? "waits for active work without another prompt" : "continues the same interrupted session once across a lost response"}`, async () => {
+    const t: Task = { ...task(), sessionID: "ses_saved", promptAttempted: true, recovery: { id: "recovery-1" } };
+    let outcome = "interrupted", prompts = 0;
+    const messages: unknown[] = [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }];
+    const ctx = { session: {
+      get: async () => ({ location: { directory: "/worktree" }, outcome }),
+      wait: async () => { if (active) outcome = "succeeded"; },
+      context: async () => messages,
+      prompt: async (input: { sessionID: string; id: string; text: string }) => {
+        assert.equal(input.sessionID, "ses_saved"); assert.ok(input.id); assert.equal(t.recovery?.attempted, true);
+        assert.match(input.text, /preserve all completed work/);
+        prompts++; messages.push({ type: "user", text: input.text }, { type: "assistant", finish: "stop" });
+        outcome = "succeeded";
+        throw new Error("Lost prompt response");
+      },
+      interrupt: async () => { assert.fail("Recovery must not interrupt an active session"); },
+      create: async () => { assert.fail("Recovery must reuse its session"); },
+    } } as unknown as Plugin.Context;
+    const make = () => new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+    const checkpoint = async (patch: Partial<Task>) => { Object.assign(t, patch); };
+    if (!active) await assert.rejects(make().run(t, checkpoint), /Lost prompt response/);
+    await make().run(t, checkpoint);
+    assert.equal(prompts, active ? 0 : 1);
+    assert.equal(t.sessionID, "ses_saved");
+  });
+}
+
+test("an unconfirmed recovery prompt is blocked instead of silently publishing or sending it twice", async () => {
+  const t: Task = { ...task(), sessionID: "ses_saved", promptAttempted: true, recovery: { id: "missing", attempted: true } };
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" }, outcome: "succeeded" }), wait: async () => {},
+    context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+    prompt: async () => { assert.fail("Do not repeat a prompt of uncertain delivery"); },
+  } } as unknown as Plugin.Context;
+  await assert.rejects(new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {}).run(t, async () => {}), /Recovery prompt delivery is uncertain/);
+});
+
+test("a real wait deadline records a recoverable session stop and interrupts once", async () => {
+  const { SessionStopped } = await import("../src/dispatcher.js");
+  let interrupts = 0;
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" } }),
+    wait: async () => new Promise(() => {}),
+    interrupt: async () => { interrupts++; },
+  } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, { ...options, sessionTimeoutSeconds: 0.01 }, new AbortController().signal, async () => {});
+  const timer = setTimeout(() => {}, 1000);
+  try {
+    await assert.rejects(executor.run({ ...task(), sessionID: "ses_saved", promptAttempted: true }, async () => {}), SessionStopped);
+    assert.equal(interrupts, 1);
+  } finally { clearTimeout(timer); }
+});

@@ -1,12 +1,41 @@
 # Changelog
 
 Release descriptions come from the exact version section committed with the tag.
-Add feature changes under `Unreleased`; after a PR merges into `release`, automation
+Add feature changes under `Unreleased`; after a `devel` PR merges into `release`, automation
 moves them into the new patch version's section. For a manual release, prepare
 and commit the exact version section before creating its tag. Prerelease headings
 include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
+
+### Documentation
+
+- Align all eight bot workflow diagrams and runtime/recovery references with the
+  implementation, including owner lifecycle, feedback queuing, session recovery,
+  verification gates, merge polling and TUI commands.
+- Require documentation and affected diagrams to be updated with each relevant
+  implementation change in repository and bundled bot instructions.
+
+### Fixed
+
+- Reconcile timed-out or interrupted sessions completed manually after a blocked
+  task or service restart. Verify and publish through the dispatcher, then process
+  queued issue feedback on the same branch and PR, including legacy checkpoints.
+
+### Added
+
+- `/restartworkflow` and the matching CLI/RPC command resume a stopped task from
+  its saved stage, preserving worktrees, sessions, PRs, and feedback. Checkpoint
+  continuation requests across restarts without bypassing checks or permissions.
+
+### Changed
+
+- Collect feature PRs on `devel` without publishing a release. Run CI on PRs to
+  `devel` and `release`, and publish automatic patches only after a same-repository
+  `devel` to `release` PR is merged.
+- After stable publication and README update, automatically merge the published
+  release head into `devel` without a synchronization PR. Preserve new development
+  commits, retry concurrent updates, and fail safely on conflicts or denied pushes.
 
 ## 0.6.5
 
@@ -44,7 +73,7 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 - Run full CI when feature PRs target `release`, including new commits to open PRs.
   Ordinary feature pushes no longer run CI or build packages.
-- Publish an automatic patch after a PR merges into `release`, and support manual
+- Publish an automatic patch after a `devel` PR merges into `release`, and support manual
   version tags on that branch without a second version bump.
 - Recover interrupted publication without moving tags or republishing completed
   packages. Commit README on `release` before opening or updating its PR to `main`.

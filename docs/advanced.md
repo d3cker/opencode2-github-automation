@@ -71,13 +71,16 @@ node dist/manage.js run /absolute/path/to/owner-project github-issues
 node dist/manage.js pause /absolute/path/to/owner-project github-issues
 node dist/manage.js resume /absolute/path/to/owner-project github-issues
 node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123'
+node dist/manage.js restartworkflow /absolute/path/to/owner-project 'owner/repository#123'
 ```
 
 `pause` stops scheduled scans and manual scheduler runs. It does not cancel queued
 work or active sessions; direct dispatcher `scan` still works.
 
-`retry` resumes blocked or failed tasks. If a session failed or prompt delivery is
-uncertain, inspect the session and worktree before explicitly starting a new one:
+`retry` clears blocked or failed status at the saved phase and requires an idle
+worker and maintenance loop. It does not append a continuation to an interrupted
+session. Prefer `restartworkflow` to continue that same session. If prompt delivery
+is uncertain, inspect the session and worktree before explicitly starting a new one:
 
 ```bash
 node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123' --restart-session
@@ -85,14 +88,29 @@ node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123'
 
 This interrupts the previous session and reuses the worktree. It preserves code
 and already-published acknowledgement comments. An issue edited after analysis
-remains blocked for review. A new authorized comment after completion starts a
+still faces the phase-specific issue/route guards on its next execution. A new authorized comment after completion starts a
 follow-up round and updates the same open PR.
+
+`restartworkflow` (also available as `/restartworkflow` in the owner TUI) queues
+recovery at the saved phase, without interrupting active execution or clearing
+the session. An interrupted session receives one checkpointed continuation
+request after it becomes idle; a completed session proceeds to verification.
+The request survives owner restarts. Uncertain delivery blocks inspection rather
+than replaying the continuation. Repeated requests while ready/running are no-ops.
+The RPC method `automation.github.restartworkflow` accepts `{ key }` and returns
+`{ accepted }`. A true result acknowledges queuing, not completed publication.
+Known tasks not blocked/failed return false after the pending-question and closed-PR
+guards. Missing tasks, unresolved questions, closed/merged PRs, absent routes,
+and unrecognized running-session errors produce errors. Recovery does not run a
+scan, resume a paused scheduler, or restart the service.
+Unlike `retry`, recovery can be queued while a different task is working.
 
 ## Persistence and reconciliation
 
 The queue stores analysis decisions and clarification dialogue, comment ID, session ID, phase, pinned base branch,
 worktree, base commit, pending questions, replies, permission decisions, helper
-IDs, check results, PR title, publication time, PR, and merge status. Writes are
+IDs, session-stop classification, recovery request and admission checkpoint, check
+results, PR title, publication time, PR, and merge status. Writes are
 atomic; heartbeat locks prevent multiple owners of the same state directory.
 
 After a crash, allow 30 seconds for an abandoned lock to expire. Do not remove
@@ -110,7 +128,7 @@ location are checked before renaming, and no model is prompted. Requests have a
 servers without a matching service registration skip this mechanism; use the
 shared service for unattended automation.
 
-SDK adapters may ignore AbortSignal. The plugin therefore bounds its own SDK waits,
+SDK adapters may ignore AbortSignal. The executor therefore bounds its local SDK waits,
 preserves healthy worker execution on owner disposal, and settles local state writes
 before releasing ownership. A replacement waits up to 15 seconds for the retiring
 owner's locks. RPC disposal has a five-second deadline per component; cleanup still
@@ -118,6 +136,14 @@ attempts every remaining step. No live lock is forcibly removed. A held-lock sta
 error should be investigated via plugin details and server logs. Back up the queue,
 worktree, and session database before recovery. Reconcile an already-published PR
 and saved session instead of restarting implementation or deleting the worktree.
+
+A blocked session stop is rechecked on worker passes (no more than once every
+30 seconds after an unsuccessful probe, and only when a new worker pass can start). A matching saved session with a successful
+final assistant response re-enters normal execution validation, checks, and
+publication automatically, including legacy timeout/interruption checkpoints.
+Failed checks, pending questions, and uncertain prompt delivery are not cleared.
+Queued feedback is retained until publication completes. The stop itself never
+automatically prompts the model; continue it manually or request workflow recovery.
 
 Only one issue executes at a time. Checks must succeed before publication. Push
 uses the exact verified commit without force. Worktrees remain available for
