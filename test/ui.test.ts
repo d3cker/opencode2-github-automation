@@ -6,6 +6,9 @@ import type { Activity } from "../src/activity.js";
 
 const activity: Activity = { key: "owner/repo#1", repo: "owner/repo", issueNumber: 1, round: 1, phase: "running", status: "ready", sessionID: "ses_test", sessionReady: true, worktree: "/worktree" };
 function fixture(initial: Activity[] = [], restored: string[] = []) {
+  const recovered: string[] = [], alerts: unknown[] = [];
+  let recoveryError: Error | undefined;
+  const commands = new Map<string, () => Promise<void>>();
   const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [], closed: string[] = [];
   const tabs = new Map(restored.map(sessionID => [sessionID, { sessionID, busy: false }]));
   let enabled = true;
@@ -13,9 +16,9 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
     location: { directory: "/repo" },
-    client: { rpc: () => ({ activity: async () => initial, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
+    client: { rpc: () => ({ activity: async () => initial, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
     data: { session: { sync: async () => {} } },
-    keymap: { layer: (get: () => { commands: { run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; } },
+    keymap: { layer: (get: () => { commands: { slash: { name: string }; run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; for (const cmd of get().commands) commands.set(cmd.slash.name, cmd.run); } },
     ui: {
       slot: (claim: { render: () => unknown }) => { claim.render(); return () => {}; },
       toast: { show: (value: unknown) => toasts.push(value) },
@@ -25,11 +28,11 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
         close: (id: string) => { assert.equal(typeof id, "string"); if (!tabs.delete(id)) return false; closed.push(id); return true; },
       },
       router: { navigate: (value: unknown) => navigated.push(value) },
-      dialog: { select: async () => activity.key, alert: async () => {} },
+      dialog: { select: async () => activity.key, alert: async (value: unknown) => { alerts.push(value); } },
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -108,4 +111,19 @@ test("activity includes saved main sessions, previous sessions and media helpers
   const row = activityOf({ key: "owner/repo#1", repo: "owner/repo", issue: { number: 1 }, phase: "pr_opened", status: "done", sessionID: "ses_current", previousSessionID: "ses_previous", sessionIDs: ["ses_old", "ses_previous", "ses_current"], helpers: [{ id: "ses_vision" }], pr: { state: "closed", html_url: "https://github.com/owner/repo/pull/2" } } as import("../src/dispatcher.js").Task);
   assert.deepEqual(row.sessionIDs, ["ses_old", "ses_previous", "ses_current", "ses_vision"]);
   assert.equal(row.phase, "pr_closed"); assert.equal(row.prState, "closed");
+});
+
+test("/restartworkflow sends the selected task to its owner and displays recovery failures", async () => {
+  const f = fixture([{ ...activity, status: "blocked" }]);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    await f.restart();
+    assert.deepEqual(f.recovered, [activity.key]);
+    assert.match(JSON.stringify(f.toasts.at(-1)), /recovery queued from the saved stage/);
+    assert.equal(f.opened.length, 0);
+    f.recoveryError(new Error("Answer the pending question in the GitHub issue first"));
+    await f.restart();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /pending question/);
+    assert.equal(f.recovered.length, 1);
+  } finally { f.stop(); }
 });

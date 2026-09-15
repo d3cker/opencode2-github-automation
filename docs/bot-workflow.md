@@ -396,7 +396,7 @@ An error normally preserves the phase so retry continues from its checkpoint.
 | `ready` | Eligible for worker selection when due. |
 | `waiting` | Awaiting an issue answer; no implementation or publication while unresolved. |
 | `retry_wait` | Transient failure; automatic retry after `nextAt`. |
-| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection and manual retry. |
+| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
 | `failed` | Other errors reached `maxAttempts`; manual retry required. |
 | `done` | PR publication/reconciliation completed; feedback and merge monitoring remain possible. |
 
@@ -408,6 +408,16 @@ flowchart LR
     Error -->|Other failure below attempt limit| Retry[retry_wait; preserve phase]
     Retry -->|nextAt elapsed| Work
     Error -->|Other failure at attempt limit| Fail[failed]
+    Block --> Completed{Stopped session now completed successfully?}
+    Completed -->|Yes| Rejoin[Resume saved session validation then checks and publication]
+    Rejoin --> Work
+    Completed -->|No| Remain[Retain block and queued feedback]
+    Block --> Recover[restartworkflow preserves saved stage and work]
+    Fail --> Recover
+    Recover --> Safe{No pending question or unsafe session error?}
+    Safe -->|No| Remain
+    Safe -->|Yes| Resume[Queue recovery, reconnect and continue same session if stopped]
+    Resume --> Work
     Block --> Manual[Manual retry while worker idle]
     Fail --> Manual
     Manual --> Restart{restartSession requested?}
@@ -432,10 +442,22 @@ flowchart LR
 - `retry` accepts only blocked or failed tasks and is rejected while the worker
   or maintenance is busy. `restartSession` does not delete the worktree or changes;
   it restarts session execution from the appropriate earlier phase.
+- Session-stop blocks are probed on worker passes, at most once per 30 seconds
+  after an unsuccessful probe. Successful saved sessions re-enter `running`
+  validation, then configured checks and publication. This recognizes legacy
+  timeout/outcome errors as well as the persisted `sessionStopped` classification.
+  It never infers success from a clean worktree or an already-pushed commit.
+- `/restartworkflow` queues a durable recovery request for a stopped task without
+  resetting its phase, worktree, branch, PR, or feedback. It can be queued while
+  another task works. For a stopped execution, the executor waits for idleness,
+  verifies the original task marker, and sends a checkpointed continuation only
+  if still incomplete. A lost response never replays that prompt blindly. Active
+  sessions are not interrupted; unresolved questions and unsafe errors remain
+  blocked. Already scheduled/running/completed tasks are no-ops.
 - Merge errors use `mergeError` and `mergeNextAt`; they do not turn a published
   task into an implementation failure.
 - Reloading the owner project after restart restores polling from durable state.
   Activity events are notifications, not the durable queue.
 
-Sources: [dispatcher.ts — workOnce, retryOnce](../src/dispatcher.ts),
+Sources: [dispatcher.ts — workOnce, restartWorkflow, retryOnce](../src/dispatcher.ts),
 [scheduler.ts](../src/scheduler.ts), [state.ts](../src/state.ts).

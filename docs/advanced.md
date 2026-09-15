@@ -71,6 +71,7 @@ node dist/manage.js run /absolute/path/to/owner-project github-issues
 node dist/manage.js pause /absolute/path/to/owner-project github-issues
 node dist/manage.js resume /absolute/path/to/owner-project github-issues
 node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123'
+node dist/manage.js restartworkflow /absolute/path/to/owner-project 'owner/repository#123'
 ```
 
 `pause` stops scheduled scans and manual scheduler runs. It does not cancel queued
@@ -88,11 +89,21 @@ and already-published acknowledgement comments. An issue edited after analysis
 remains blocked for review. A new authorized comment after completion starts a
 follow-up round and updates the same open PR.
 
+`restartworkflow` (also available as `/restartworkflow` in the owner TUI) queues
+recovery at the saved phase, without interrupting active execution or clearing
+the session. An interrupted session receives one checkpointed continuation
+request after it becomes idle; a completed session proceeds to verification.
+The request survives owner restarts. Uncertain delivery blocks inspection rather
+than replaying the continuation. Repeated requests while ready/running are no-ops.
+Questions, permissions, closed PRs, and missing execution routes remain guarded.
+Unlike `retry`, recovery can be queued while a different task is working.
+
 ## Persistence and reconciliation
 
 The queue stores analysis decisions and clarification dialogue, comment ID, session ID, phase, pinned base branch,
 worktree, base commit, pending questions, replies, permission decisions, helper
-IDs, check results, PR title, publication time, PR, and merge status. Writes are
+IDs, session-stop classification, recovery request and admission checkpoint, check
+results, PR title, publication time, PR, and merge status. Writes are
 atomic; heartbeat locks prevent multiple owners of the same state directory.
 
 After a crash, allow 30 seconds for an abandoned lock to expire. Do not remove
@@ -118,6 +129,14 @@ attempts every remaining step. No live lock is forcibly removed. A held-lock sta
 error should be investigated via plugin details and server logs. Back up the queue,
 worktree, and session database before recovery. Reconcile an already-published PR
 and saved session instead of restarting implementation or deleting the worktree.
+
+A blocked session stop is rechecked on worker passes (no more than once every
+30 seconds after an unsuccessful probe). A matching saved session with a successful
+final assistant response re-enters normal execution validation, checks, and
+publication automatically, including legacy timeout/interruption checkpoints.
+Failed checks, pending questions, and uncertain prompt delivery are not cleared.
+Queued feedback is retained until publication completes. The stop itself never
+automatically prompts the model; continue it manually or request workflow recovery.
 
 Only one issue executes at a time. Checks must succeed before publication. Push
 uses the exact verified commit without force. Worktrees remain available for

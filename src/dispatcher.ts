@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { type GithubOptions, type Repository, Route, matchRoute } from "./config.js";
 import { GithubError, Issue, Comment, type Pull } from "./github.js";
@@ -24,6 +24,8 @@ export const Task = z.object({
   helpers: z.array(z.object({ id: z.string(), parentID: z.string(), capability: z.enum(["vision", "audio"]) })).optional(),
   branch: z.string(), worktree: z.string().optional(), baseSha: z.string().optional(),
   sessionID: z.string().optional(), promptAttempted: z.boolean().optional(),
+  sessionStopped: z.boolean().optional(),
+  recovery: z.object({ id: z.string(), attempted: z.boolean().optional() }).optional(),
   sessionIDs: z.array(z.string()).optional(),
   sessionReady: z.boolean().optional(), round: z.number().int().positive().optional(),
   source: z.enum(["issue", "comment"]).optional(),
@@ -38,7 +40,16 @@ export type Task = z.infer<typeof Task>;
 export const Queue = z.object({ version: z.literal(1), tasks: z.array(Task) });
 export type Queue = z.infer<typeof Queue>;
 export class Blocked extends Error {}
+export class SessionStopped extends Blocked {}
 export class WaitingForAnswer extends Error {}
+
+function stoppedSession(task: Task) {
+  // Recognize checkpoints from releases before sessionStopped was persisted.
+  return task.sessionStopped || [
+    "Error: Session timed out and was interrupted; inspect it before retrying",
+    "Error: Session did not complete successfully; inspect its outcome and permissions",
+  ].includes(task.error ?? "");
+}
 
 export interface GithubPort {
   mergeApproved?(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean>;
@@ -60,6 +71,7 @@ export interface Executor {
   verify(task: Task, repo: Repository): Promise<{ checks: string[]; commit: string }>;
   push(task: Task, repo: Repository): Promise<void>;
   cancel(task: Task): Promise<void>;
+  completed?(task: Task): Promise<boolean>;
 }
 
 export class Dispatcher {
@@ -171,6 +183,22 @@ export class Dispatcher {
     return this.working;
   }
   private async workOnce() {
+    // A person can finish a stopped session in the TUI while the durable task
+    // still says blocked. Rejoin normal verification/publication, never infer
+    // completion from Git changes or discard pending issue feedback.
+    for (const task of this.queue.tasks.filter(t => t.phase === "running" && t.sessionID && stoppedSession(t) && ["blocked", "failed"].includes(t.status) && t.nextAt <= this.now() && (!t.question || t.question.delivered))) {
+      try {
+        const completed = await this.executor.completed?.(structuredClone(task));
+        await this.serial.run(async () => {
+          this.signal.throwIfAborted();
+          if (!["blocked", "failed"].includes(task.status)) return;
+          Object.assign(task, completed
+            ? { status: "ready", attempts: 0, nextAt: this.now(), error: undefined }
+            : { nextAt: this.now() + 30_000 });
+          await this.store.save(this.queue);
+        });
+      } catch { if (this.signal.aborted) return; await this.update(task, { nextAt: this.now() + 30_000 }); }
+    }
     // A lost comment response must not strand a waiting question after a restart.
     for (const pending of this.queue.tasks.filter(t => t.status === "waiting" && t.question && !t.question.commentID && t.nextAt <= this.now())) {
       const q = pending.question!;
@@ -183,7 +211,7 @@ export class Dispatcher {
       Object.assign(finished, { round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
         phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
         analysisDecision: undefined, analysisDialogue: undefined, question: undefined,
-        sessionID: undefined, sessionReady: false, promptAttempted: false, checks: undefined, commit: undefined, error: undefined });
+        sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, checks: undefined, commit: undefined, error: undefined });
       await this.store.save(this.queue);
     });
     const resumable = this.queue.tasks.filter(t => ["ready", "retry_wait"].includes(t.status));
@@ -231,7 +259,7 @@ export class Dispatcher {
       if (task.phase === "running") {
         await this.executor.run(task, patch => this.update(task, patch));
         if (task.question && !task.question.delivered) throw new WaitingForAnswer("Waiting for a reply in the GitHub issue");
-        await this.update(task, { phase: "verifying", attempts: 0 });
+        await this.update(task, { phase: "verifying", attempts: 0, sessionStopped: undefined, recovery: undefined });
       }
       if (task.phase === "verifying") {
         const result = await this.executor.verify(task, repo);
@@ -254,7 +282,7 @@ export class Dispatcher {
       if (error instanceof WaitingForAnswer) { await this.update(task, { status: task.question?.answer ? "ready" : "waiting", error: undefined }); return; }
       const attempts = task.attempts + 1;
       const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
-      await this.update(task, { attempts, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
+      await this.update(task, { attempts, sessionStopped: error instanceof SessionStopped, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
     }
   }
   private async resolveAnalysis(task: Task, repo: Repository) {
@@ -385,6 +413,24 @@ export class Dispatcher {
     this.maintenance = this.retryOnce(key, restartSession);
     try { return await this.maintenance; }
     finally { this.maintenance = undefined; }
+  }
+  async restartWorkflow(key: string) {
+    return this.serial.run(async () => {
+      this.signal.throwIfAborted();
+      const task = this.queue.tasks.find(t => t.key === key);
+      if (!task) throw new Error("Task not found in this project");
+      if (task.question && !task.question.delivered) throw new Error("Answer the pending question or permission request in the GitHub issue first");
+      if (task.merged || task.pr?.state === "closed") throw new Error("The original PR is closed or merged; reopen it or create a new issue");
+      if (!["blocked", "failed"].includes(task.status)) return false;
+      if (task.phase === "running" && !stoppedSession(task)) throw new Error("Inspect the session error before retrying; workflow restart cannot bypass uncertain prompt delivery or execution configuration errors");
+      if (!task.route) throw new Error("Fix the execution route and use retry before restarting the workflow");
+      Object.assign(task, {
+        status: "ready", attempts: 0, nextAt: this.now(), error: undefined,
+        ...(task.phase === "running" ? { recovery: { id: randomUUID() } } : {}),
+      });
+      await this.store.save(this.queue);
+      return true;
+    });
   }
   private async retryOnce(key: string, restartSession: boolean) {
     const task = this.queue.tasks.find(t => t.key === key);

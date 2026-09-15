@@ -8,6 +8,18 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+### Fixed
+
+- Reconcile timed-out or interrupted sessions completed manually after a blocked
+  task or service restart. Verify and publish through the dispatcher, then process
+  queued issue feedback on the same branch and PR, including legacy checkpoints.
+
+### Added
+
+- `/restartworkflow` and the matching CLI/RPC command resume a stopped task from
+  its saved stage, preserving worktrees, sessions, PRs, and feedback. Checkpoint
+  continuation requests across restarts without bypassing checks or permissions.
+
 ## 0.6.5
 
 ### Fixed

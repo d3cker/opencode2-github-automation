@@ -4,9 +4,9 @@ import { resolve } from "node:path";
 import { GithubRpc, SchedulerRpc } from "./rpc.js";
 
 const [command, directory, argument, flag] = process.argv.slice(2);
-const commands = ["status", "scan", "run", "pause", "resume", "retry"];
-if (!command || !commands.includes(command) || !directory || ["run", "pause", "resume", "retry"].includes(command) && !argument) {
-  console.error("Usage: node dist/manage.js <status|scan|run|pause|resume|retry> <owner-directory> [job-id|issue-key] [--restart-session]");
+const commands = ["status", "scan", "run", "pause", "resume", "retry", "restartworkflow"];
+if (!command || !commands.includes(command) || !directory || ["run", "pause", "resume", "retry", "restartworkflow"].includes(command) && !argument) {
+  console.error("Usage: node dist/manage.js <status|scan|run|pause|resume|retry|restartworkflow> <owner-directory> [job-id|issue-key] [--restart-session]");
   process.exitCode = 1;
 } else {
   try {
@@ -22,6 +22,7 @@ if (!command || !commands.includes(command) || !directory || ["run", "pause", "r
       case "run": result = await scheduler.run({ id: argument! }, request); break;
       case "pause": case "resume": result = await scheduler.pause({ id: argument!, paused: command === "pause" }, request); break;
       case "retry": result = await github.retry({ key: argument!, restartSession: flag === "--restart-session" }, request); break;
+      case "restartworkflow": result = await github.restartworkflow({ key: argument! }, request); break;
     }
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {

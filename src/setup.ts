@@ -26,7 +26,7 @@ async function main() {
     console.log("Updated the OpenCode integration and UI. Configuration and queue were preserved.");
     return;
   }
-  if (operation && ["status", "scan", "run", "pause", "resume", "retry"].includes(operation)) {
+  if (operation && ["status", "scan", "run", "pause", "resume", "retry", "restartworkflow"].includes(operation)) {
     const { root } = await checkout(process.cwd());
     if (["run", "pause", "resume"].includes(operation) && !process.argv[3]) process.argv.push("github-issues");
     process.argv.splice(3, 0, root);
@@ -42,7 +42,7 @@ async function main() {
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\ninstall registers the global plugin. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\n       opencode2-automation restartworkflow owner/repo#123\ninstall registers the global plugin. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());

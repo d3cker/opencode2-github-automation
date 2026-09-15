@@ -54,6 +54,7 @@ export default Plugin.define({
         status: async () => JSON.parse(JSON.stringify(dispatcher.status())),
         activity: async () => dispatcher.activity(),
         retry: async ({ key, restartSession }) => { controller.signal.throwIfAborted(); return { accepted: await dispatcher.retry(key, restartSession) }; },
+        restartworkflow: async ({ key }) => ({ accepted: await dispatcher.restartWorkflow(key) }),
       });
       registration = rpc;
       publish = activity => rpc.events.emit("activity", activity);

@@ -14,6 +14,7 @@ export const GithubRpc = Rpc.define({
     status: { input: z.object({}).strict(), output: z.array(z.json()) },
     activity: { input: z.object({}).strict(), output: z.array(Activity) },
     retry: { input: z.object({ key: z.string(), restartSession: z.boolean().default(false) }), output: z.object({ accepted: z.boolean() }) },
+    restartworkflow: { input: z.object({ key: z.string() }).strict(), output: z.object({ accepted: z.boolean() }) },
   },
 });
 export const SchedulerRpc = Rpc.define({

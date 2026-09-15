@@ -200,8 +200,32 @@ cd /absolute/path/to/your-project
 "$HOME/.local/bin/opencode2-automation" scan
 "$HOME/.local/bin/opencode2-automation" pause
 "$HOME/.local/bin/opencode2-automation" resume
+"$HOME/.local/bin/opencode2-automation" restartworkflow 'owner/repository#123'
 ```
 
 Pausing stops scheduled scans; it does not cancel accepted tasks or active sessions.
 Do not run independent bots on two machines against the same issues: they do not
 share queue ownership across machines.
+
+## Interrupted sessions and workflow recovery
+
+If you manually continue a timed-out or interrupted bot session in the TUI,
+the dispatcher detects its successful completion automatically. It rejoins the
+saved execution phase, validates the session result, runs the configured checks,
+and publishes the verified changes to the same branch and PR. Pending authorized
+issue comments remain queued and start the next round after publication. This
+also works after a service restart; opening a TUI is not required.
+
+Use `/restartworkflow` in the owner project's TUI and select the issue to recover
+a stopped workflow. The equivalent terminal command is shown above. For a stopped
+session, recovery waits for any current execution, then continues the previously
+agreed task in that same session if it still needs work. For a verification or
+publication failure, it retries that saved stage. It preserves the worktree,
+branch, session history, pinned base, PR, and queued feedback. Repeated requests
+while recovery is scheduled or running do not start duplicate work.
+
+Recovery does not bypass failing checks, unresolved questions or permissions,
+closed PRs, or uncertain prompt delivery. Answer pending questions in the issue.
+If a check still fails, fix its cause and retry; the plugin will not publish an
+unverified result. A service restart restores the saved state but does not clear
+these blocks. To resume paused issue polling, use `resume` separately.

@@ -13,7 +13,7 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
   isolated Git worktree, verifies changes, and pushes the verified commit.
 - **Terminal UI:** subscribes to activity events and polls for missed updates.
   Opens background tabs, closes task tabs after PR closure while retaining
-  session history, and exposes the `/bot` task selector.
+  session history, and exposes `/bot` and `/restartworkflow` task selectors.
 
 ## Workflow
 
@@ -29,7 +29,9 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
 
 A failure retains the current phase and retry state. A possibly running session
 is reconciled before starting another issue. Unknown prompt delivery is blocked
-for inspection. RPC events are ephemeral; they are not the durable queue.
+for inspection. Stopped sessions completed manually are detected automatically and
+rejoin verification/publication before queued feedback runs. Explicit workflow
+recovery preserves checkpoints and continues the same session when needed. RPC events are ephemeral; they are not the durable queue.
 
 ## Configuration and ownership
 
