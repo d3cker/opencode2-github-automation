@@ -1,5 +1,6 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { z } from "zod";
+import { DispatcherMonitor } from "./monitor.js";
 import { Activity } from "./activity.js";
 
 export const GithubRpc = Rpc.define({
@@ -12,6 +13,7 @@ export const GithubRpc = Rpc.define({
     diagnose: { input: z.object({ sessionID: z.string() }), output: z.object({ exists: z.boolean(), error: z.string().optional() }) },
     scan: { input: z.object({}).strict(), output: z.object({ queued: z.number(), ignored: z.number() }) },
     status: { input: z.object({}).strict(), output: z.array(z.json()) },
+    monitor: { input: z.object({}).strict(), output: DispatcherMonitor },
     activity: { input: z.object({}).strict(), output: z.array(Activity) },
     retry: { input: z.object({ key: z.string(), restartSession: z.boolean().default(false) }), output: z.object({ accepted: z.boolean() }) },
     restartworkflow: { input: z.object({ key: z.string() }).strict(), output: z.object({ accepted: z.boolean() }) },

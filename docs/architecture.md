@@ -14,6 +14,8 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
 - **Terminal UI:** subscribes to activity events and polls for missed updates.
   Opens background tabs, closes task tabs after PR closure while retaining
   session history, and exposes `/bot` and `/restartworkflow` task selectors.
+  A read-only runtime sidebar and `/botstatus` combine live dispatcher diagnostics,
+  scheduler state and task snapshots, marking stale or unavailable data.
 
 ## Workflow
 
@@ -61,3 +63,10 @@ session continues and the replacement owner reconciles its saved identity.
 
 See [advanced configuration](advanced.md) for retry commands, limits, and RPC
 settings, and the [README](../README.md) for installation and user-facing behavior.
+
+Runtime monitoring is observational: `automation.github.monitor` exposes the
+owner's current worker operation, active task, scan timing/error, and enriched
+activity snapshots. Scheduler status retains its existing RPC. The TUI polls both
+independently every five seconds through the connected client; it does not infer
+worker activity from queue status alone. These live diagnostics do not add durable
+workflow phases or replace the existing ownership keepalive.

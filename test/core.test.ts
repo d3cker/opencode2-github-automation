@@ -787,3 +787,29 @@ test("restartworkflow persists one recovery request without resetting session, w
   assert.equal(d.status()[0]!.recovery, undefined);
   assert.equal(await d.restartWorkflow(saved.key), false);
 });
+
+test("monitor reports in-flight discovery and redacts scan failures without changing queue state", async () => {
+  const f = fixture();
+  let reject!: (error: Error) => void;
+  f.github.issues = () => new Promise((_resolve, fail) => { reject = fail; });
+  const d = new Dispatcher(options, f.store, f.github, f.executor, new AbortController().signal, ["TOPSECRET"], () => 1000);
+  await d.init(); const scan = d.scan();
+  assert.equal(d.monitor().scanning, true); assert.equal(d.monitor().lastScanStarted, 1000);
+  reject(new Error("TOPSECRET failed")); await assert.rejects(scan);
+  assert.equal(d.monitor().scanning, false); assert.equal(d.monitor().lastScanFinished, 1000);
+  assert.doesNotMatch(d.monitor().scanError!, /TOPSECRET/); assert.match(d.monitor().scanError!, /REDACTED/);
+  assert.deepEqual(d.status(), []); assert.equal(d.monitor().worker, "idle");
+});
+test("monitor identifies the actual executing task and returns to idle after publication", async () => {
+  const f = fixture();
+  let entered!: () => void, release!: () => void;
+  const running = new Promise<void>(r => { entered = r; }), wait = new Promise<void>(r => { release = r; });
+  f.executor.run = async () => { entered(); await wait; };
+  const d = f.make(); await d.init(); await d.scan(); const tick = d.tick(); await running;
+  assert.equal(d.monitor().worker, "executing"); assert.equal(d.monitor().activeTask, "owner/repo#1");
+  assert.equal(d.monitor().tasks[0]!.phase, "running");
+  assert.deepEqual(d.monitor(), JSON.parse(JSON.stringify(d.monitor())));
+  release(); await tick;
+  assert.equal(d.monitor().worker, "idle"); assert.equal(d.monitor().activeTask, undefined);
+  assert.equal(d.monitor().tasks[0]!.status, "done");
+});

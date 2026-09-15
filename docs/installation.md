@@ -93,6 +93,22 @@ registers the server/UI loaders, and runs the wizard. Existing configuration and
 queues are preserved on upgrades. Do not combine global and project-local copies.
 No package is published to npm; `private: true` blocks accidental publication.
 
+## TUI rendering and source validation
+
+The runtime sidebar uses the host's OpenTUI/Solid APIs and semantic theme tokens.
+The package declares OpenTUI and Solid peer dependencies; server entrypoint imports
+stay independent of renderer initialization. A sidebar update requires both the
+owner plugin's monitor RPC and an updated/reopened TUI. An older or unavailable
+owner is shown as unavailable rather than silently idle. The integration follows
+the [OpenCode CLI plugin API](https://opencode.ai/v2/docs/build/plugins/cli/).
+
+For development, `npm ci` installs pinned renderer, theme and Bun test dependencies.
+`npm run check` includes `npm run test:tui`, which renders the actual sidebar using
+Bun's native OpenTUI support and checks live updates, stale readings, tab selection
+and a narrow layout. Bun is needed for this native renderer test, not for the
+Node-based management CLI. Package validation still imports the server and TUI
+entrypoints in an isolated Node installation without initializing a renderer.
+
 ## Testing and migration
 
 Use a separate test repository when testing on another machine. Independent

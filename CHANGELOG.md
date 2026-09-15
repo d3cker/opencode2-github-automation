@@ -24,6 +24,12 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Added
 
+- Add a live BOT RUNTIME sidebar and `/botstatus` report with dispatcher operations,
+  scheduler scans/retries, queue counts and selected-task details. Keep stale and
+  unavailable readings explicit; monitor through read-only owner-scoped RPC.
+- Validate native sidebar rendering, reactive updates and narrow layouts as part
+  of the standard check command using pinned TUI/Bun development dependencies.
+
 - `/restartworkflow` and the matching CLI/RPC command resume a stopped task from
   its saved stage, preserving worktrees, sessions, PRs, and feedback. Checkpoint
   continuation requests across restarts without bypassing checks or permissions.

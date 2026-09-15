@@ -9,7 +9,7 @@ modify its files with the Contents API, or bypass its protection rules.
 | Event | Result |
 | --- | --- |
 | Commit/push on a feature branch without an open PR | No CI run and no package build. |
-| Open, reopen, or update a PR targeting `release` | Full CI on Node 22 and 24, including build and isolated package installation. |
+| Open, reopen, or update a PR targeting `release` | Full CI on Node 22 and 24, including native TUI rendering with the pinned Bun test dependency, build and isolated package installation. |
 | Merge that PR into `release` | Automatic patch version, tag, package publication, README commit on `release`, and promotion PR. |
 | Close that PR without merging | No publication. |
 | Push a version tag pointing to code on `release` | Publish that exact version, without an automatic bump. |
