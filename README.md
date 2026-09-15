@@ -303,21 +303,27 @@ copy it to another machine and follow the `.tgz` instructions above.
 
 ## GitHub Actions and releases
 
-1. Work on a feature branch and add release notes under `Unreleased` in
-   [CHANGELOG.md](CHANGELOG.md). Ordinary branch pushes do not run CI or publish packages.
-2. Open a PR into the long-lived `release` branch. CI runs lint, type checking,
-   tests, a build, and an installation check on Node 22 and 24. New commits to
-   the open PR rerun these checks. Review and merge after they pass.
-3. The merge starts **Release**. It increments the patch version on `release`,
-   moves the unreleased notes into that version's changelog section, and pushes
-   the version commit and tag atomically. It builds and verifies the tagged
-   package, then publishes the GitHub Release with `.tgz`, SHA-256, and exact
-   version notes. No package is published to npm.
-4. Only after publication succeeds, automation commits the versioned README link
-   on `release` and opens or updates a PR from `release` into `main`.
-5. Review and merge that PR with a **merge commit**. All code, version metadata,
-   release notes, and README changes reach protected `main` through this PR.
-   The automation never pushes to `main` or writes its files through the API.
+1. Create a feature branch from `devel` and add release notes under `Unreleased`
+   in [CHANGELOG.md](CHANGELOG.md). Pushes without an open PR do not run CI.
+2. Open a PR into `devel`. CI runs lint, type checking, tests, a build, and an
+   installation check on Node 22 and 24. New commits to the open PR rerun checks.
+   Review and merge after they pass. Merging into `devel` does not publish a package.
+3. When ready to publish the accumulated changes, open a `devel` → `release` PR.
+   After its checks pass, review and merge it with a **merge commit**.
+4. The merge starts **Release**: an automatic patch version, exact changelog notes,
+   atomic version/tag push, and publication of the verified `.tgz` and SHA-256.
+   No package is published to npm.
+5. After publication, automation commits the new README download link on `release`
+   and opens or updates the `release` → `main` promotion PR. It also automatically
+   merges that published head into `devel`, including version metadata and README,
+   preserving newer development work. No synchronization PR is created.
+6. Review and merge the promotion PR with a **merge commit**. Protected `main`
+   receives all released code, metadata and README through that PR only.
+
+A synchronization conflict or rejected push fails the Release job without
+resetting `devel` or undoing publication. Resolve the conflict or permissions and
+rerun the job; it reuses the published version. Synchronization does not wait for
+the main PR to merge and does not trigger another release.
 
 To choose a version manually, prepare and commit its exact changelog section on
 `release`, then use `npm version`, for example:
@@ -333,7 +339,8 @@ git push --atomic origin release v1.0.0
 The pushed tag publishes exactly `1.0.0`, without another version bump. Both
 `v1.0.0` and `1.0.0` tag names are accepted. The next automatic patch is `1.0.1`.
 Version tags must point to code on `release`; ordinary pushes to that branch
-never start publication. Finish the active release before merging another feature.
+never start publication. Finish the active release before merging another `devel` → `release` PR.
+Feature PRs may continue to accumulate on `devel`.
 
 The README on `release` is updated after publication; the README on `main` changes
 when the promotion PR is merged. The tag and packaged README remain snapshots

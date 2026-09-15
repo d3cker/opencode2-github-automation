@@ -4,7 +4,10 @@ Use English for all user-facing prompts, UI labels, errors, generated bot messag
 
 Never push commits directly to `main` or modify its files through GitHub APIs.
 All changes reach `main` by merging a PR from `release`. Feature PRs target
-`release`; version and post-publication README commits belong on `release`.
+`devel`. Only a reviewed `devel` → `release` PR starts automatic publication.
+Version and post-publication README commits belong on `release`; after a stable
+publication, automation merges that published head back into `devel` without a
+PR or force push. Never reset development work to match release.
 
 ## Project context
 
@@ -28,7 +31,7 @@ steps, project setup, headless operation, and removal.
 | [docs/runtime.md](docs/runtime.md) | User-visible behavior while the bot runs: GitHub questions and permission replies, branch selection, media inputs, prompt loading, follow-up comments, session tabs, runtime sidebar/status freshness, and routine management commands. | Use when changing issue conversations, session continuation, runtime tools, or TUI behavior. |
 | [docs/advanced.md](docs/advanced.md) | Separate scheduler/dispatcher setup, multiple repositories, custom RPC jobs, full options, timeouts, management and retry commands, persistence, reconciliation, locks, and known limits. | Use for low-level configuration, operational troubleshooting, recovery, or ownership/concurrency changes. |
 | [docs/installation.md](docs/installation.md) | Loader registration, config-directory precedence, prerequisites, source installation, project-local installation, upgrade conflicts, testing on another machine, and migration limits. | Use when working on packaging, installers, registration, upgrades, or deployment troubleshooting. |
-| [docs/releases.md](docs/releases.md) | Feature-to-release PR checks, automatic patch versions, manual npm version/tag releases, exact changelog notes, publication recovery, README commits on release, and promotion PRs into protected main. | Use for CI triggers, versioning, packaging, GitHub Release publication, branch permissions, or recovery after a failed release. |
+| [docs/releases.md](docs/releases.md) | Feature-to-devel and devel-to-release PR checks, automatic patch versions, manual npm version/tag releases, exact changelog notes, publication recovery, README commits on release, automatic release-to-devel synchronization, and promotion PRs into protected main. | Use for CI triggers, versioning, packaging, GitHub Release publication, branch permissions, or recovery after a failed release. |
 
 For common investigations:
 

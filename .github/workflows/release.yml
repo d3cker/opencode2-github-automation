@@ -18,7 +18,7 @@ concurrency:
 jobs:
   release:
     name: Publish from release and open promotion PR
-    if: github.event_name == 'push' || github.event.pull_request.merged == true
+    if: github.event_name == 'push' || (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'devel' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -37,7 +37,7 @@ jobs:
           cache: npm
       - name: Install pipeline dependencies
         run: npm ci --ignore-scripts
-      - name: Prepare version, publish package, and promote through a PR
+      - name: Publish, prepare main PR, and synchronize devel
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-pipeline.mjs

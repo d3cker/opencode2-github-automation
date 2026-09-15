@@ -7,7 +7,9 @@ and troubleshooting.
 The README's package installation command contains the versioned GitHub asset URL
 for the stable release promoted into that branch. After publication, automation
 updates README on `release`; its PR carries the update into `main` when merged.
-While that PR awaits review, `release` contains the newer download link. For
+While that PR awaits review, `release` contains the newer download link. The
+publisher also merges the released version and README into `devel` automatically,
+without waiting for the main PR or creating another PR. For
 upgrades, use that branch's current README rather than a copy from an old archive
 or tag, and keep the same installation prefix. Prereleases do not replace the
 stable link. Maintainer setup and retries are in [Release process](releases.md).
