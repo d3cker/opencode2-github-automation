@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { githubClient, prepareChangelog, releaseRequest, runRelease, verifyFeature, verifyPromotion } from "../scripts/release-pipeline.mjs";
+import { githubClient, prepareChangelog, releaseRequest, runRelease, syncDevel, verifyFeature, verifyPromotion } from "../scripts/release-pipeline.mjs";
 import { updateReadme } from "../scripts/update-release-readme.mjs";
 
 const exec = promisify(execFile);
@@ -42,22 +42,28 @@ async function fixture(t) {
   await git("init", "--bare", remote);
   await git("remote", "add", "origin", remote);
   await git("branch", "release");
-  await git("push", "origin", "main", "release");
+  await git("branch", "devel");
+  await git("push", "origin", "main", "release", "devel");
   // Model a protected main at the Git transport boundary, not just with a mock.
   await writeFile(join(remote, "hooks/pre-receive"), '#!/bin/sh\nwhile read old new ref; do\n  if [ "$ref" = "refs/heads/main" ]; then exit 1; fi\ndone\n', { mode: 0o755 });
   await git("switch", "release");
   const eventFor = sha => ({ action: "closed", repository: { full_name: repository }, pull_request: {
-    number: 7, merged: true, merge_commit_sha: sha, base: { ref: "release" },
+    number: 7, merged: true, merge_commit_sha: sha, base: { ref: "release" }, head: { ref: "devel", repo: { full_name: repository } },
   } });
   async function mergeFeature(number = 7) {
-    await git("switch", "-c", `feature/${number}`, "release");
+    await git("switch", "devel");
+    await git("merge", "--ff-only", "origin/devel");
+    await git("switch", "-c", `feature/${number}`);
     await writeFile(join(cwd, "code.txt"), `feature ${number}\n`);
     const changelog = await readFile(join(cwd, "CHANGELOG.md"), "utf8");
     await writeFile(join(cwd, "CHANGELOG.md"), changelog.replace("## Unreleased", `## Unreleased\n- Implement feature ${number}`));
     await git("add", ".");
     await git("commit", "-m", `Feature ${number}`);
-    await git("switch", "release");
+    await git("switch", "devel");
     await git("merge", "--no-ff", `feature/${number}`, "-m", `Merge PR #${number}`);
+    await git("push", "origin", "devel");
+    await git("switch", "release");
+    await git("merge", "--no-ff", "devel", "-m", `Merge devel release PR #${number}`);
     await git("push", "origin", "release");
     const event = eventFor(await git("rev-parse", "HEAD"));
     event.pull_request.number = number;
@@ -102,6 +108,7 @@ test("automatic patch publishes before README and PR, leaves protected main unto
   assert.equal(await f.bare("rev-parse", "v0.6.3^"), f.event.pull_request.merge_commit_sha);
   const tagged = await f.bare("rev-parse", "v0.6.3^{commit}");
   const tip = await f.bare("rev-parse", "release");
+  assert.equal(await f.bare("rev-parse", "devel"), tip);
   assert.notEqual(tip, tagged);
   assert.equal(await f.bare("diff", "--name-only", tagged, tip), "README.md");
   assert.match(await f.bare("show", "release:CHANGELOG.md"), /## 0\.6\.3\n- Implement feature 7/);
@@ -133,11 +140,13 @@ test("a manual unprefixed 1.0.0 tag is published unchanged and the next merged P
 
 test("package failure leaves README and PR unchanged; retry resumes the same version", async t => {
   const f = await fixture(t);
+  const devel = await f.bare("rev-parse", "devel");
   const original = await f.bare("show", "release:README.md");
   await assert.rejects(f.run({ build: async () => { throw new Error("Package failed"); } }), /Package failed/);
   assert.equal(await f.bare("show", "release:README.md"), original);
   assert.equal(f.releases.has("v0.6.3"), false);
   assert.equal(f.pull(), undefined);
+  assert.equal(await f.bare("rev-parse", "devel"), devel);
   assert.equal((await f.run()).tag, "v0.6.3");
   assert.equal(await f.git("tag", "--list", "v0.6.4"), "");
 });
@@ -172,6 +181,9 @@ test("unmerged PRs, main merges, ordinary pushes, and foreign repositories canno
     { ref: "refs/heads/release" }, { ref: "refs/heads/feature/test" },
     { action: "closed", pull_request: { merged: false, base: { ref: "release" } } },
     { action: "closed", pull_request: { merged: true, base: { ref: "main" } } },
+    { action: "closed", pull_request: { merged: true, base: { ref: "devel" } } },
+    { action: "closed", pull_request: { merged: true, base: { ref: "release" }, head: { ref: "feature/test", repo: { full_name: repository } } } },
+    { action: "closed", pull_request: { merged: true, base: { ref: "release" }, head: { ref: "devel", repo: { full_name: "fork/automation" } } } },
     { ref: "refs/tags/v1.0.0", after: "bad" },
   ]) assert.throws(() => releaseRequest({ repository: { full_name: repository }, ...event }, repository));
   assert.throws(() => releaseRequest({ repository: { full_name: "another/repo" } }, repository));
@@ -270,4 +282,98 @@ test("GitHub promotion creates or updates only a release-to-main PR, with no con
   const retry = await client.promote({ title: "Release v0.6.4", body: "New notes" });
   assert.equal(first.html_url, retry.html_url);
   assert.deepEqual(calls.map(c => c.method), ["GET", "POST", "GET", "PATCH"]);
+});
+
+test("published release merges into ahead devel without losing new work or opening another PR", async t => {
+  const f = await fixture(t);
+  await f.git("switch", "devel");
+  await writeFile(join(f.cwd, "next-feature.txt"), "Keep unreleased work\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "Next development work");
+  const work = await f.git("rev-parse", "HEAD");
+  await f.git("push", "origin", "devel");
+  await f.git("switch", "release");
+  await f.run();
+  const devel = await f.bare("rev-parse", "devel");
+  const release = await f.bare("rev-parse", "release");
+  await f.bare("merge-base", "--is-ancestor", work, devel);
+  await f.bare("merge-base", "--is-ancestor", release, devel);
+  assert.equal(await f.bare("show", "devel:next-feature.txt"), "Keep unreleased work");
+  assert.match(await f.bare("show", "devel:README.md"), /v0\.6\.3/);
+  assert.equal(JSON.parse(await f.bare("show", "devel:package.json")).version, "0.6.3");
+  assert.equal(f.calls.filter(c => c === "promote").length, 1);
+  await f.run();
+  assert.equal(await f.bare("rev-parse", "devel"), devel);
+  assert.equal(await f.bare("rev-parse", "main"), f.main);
+});
+
+test("devel merge conflicts preserve remote work and published release; retry does not republish", async t => {
+  const f = await fixture(t);
+  await f.git("switch", "devel");
+  await writeFile(join(f.cwd, "README.md"), "Conflicting development README\n");
+  await f.git("commit", "-am", "Concurrent README edit");
+  const before = await f.git("rev-parse", "HEAD");
+  await f.git("push", "origin", "devel");
+  await f.git("switch", "release");
+  await assert.rejects(f.run(), /release-to-devel merge conflicted/);
+  assert.equal(await f.bare("rev-parse", "devel"), before);
+  assert.equal(await f.git("status", "--porcelain"), "");
+  assert.equal((await f.git("worktree", "list", "--porcelain")).split("worktree ").length, 2);
+  assert.ok(f.pull());
+  assert.equal(f.releases.get("v0.6.3").draft, false);
+  // A maintainer resolves the conflict on devel, preserving its history.
+  await f.git("switch", "devel");
+  await writeFile(join(f.cwd, "README.md"), await f.bare("show", "release:README.md") + "\n");
+  await f.git("commit", "-am", "Resolve published README conflict");
+  await f.git("push", "origin", "devel");
+  await f.git("switch", "release");
+  await f.run();
+  await f.bare("merge-base", "--is-ancestor", "release", "devel");
+  assert.equal(f.calls.filter(c => c.startsWith("publish")).length, 1);
+  assert.equal(f.calls.filter(c => c.startsWith("build")).length, 1);
+});
+
+test("devel protection rejection never bypasses branch rules or rolls back publication", async t => {
+  const f = await fixture(t);
+  const before = await f.bare("rev-parse", "devel");
+  const remote = await f.git("remote", "get-url", "origin");
+  await writeFile(join(remote, "hooks/pre-receive"), '#!/bin/sh\nwhile read old new ref; do\n  if [ "$ref" = "refs/heads/main" ] || [ "$ref" = "refs/heads/devel" ]; then exit 1; fi\ndone\n', { mode: 0o755 });
+  await assert.rejects(f.run(), /devel sync push failed/);
+  assert.equal(await f.bare("rev-parse", "devel"), before);
+  assert.ok(f.pull());
+  assert.equal(await f.bare("rev-parse", "main"), f.main);
+});
+
+test("CI rejects a direct feature-to-release PR and permits devel promotion", async t => {
+  const f = await fixture(t);
+  const event = structuredClone(f.event);
+  event.pull_request.head.ref = "feature/test";
+  await assert.rejects(verifyFeature(f.cwd, event, repository), /Feature PRs must target devel/);
+  assert.match(await verifyFeature(f.cwd, f.event, repository), /ready for patch/);
+});
+
+test("a concurrent devel update is merged on retry rather than overwritten", async t => {
+  const f = await fixture(t);
+  await f.run();
+  await f.git("switch", "-c", "release-extra", "release");
+  await writeFile(join(f.cwd, "published.txt"), "published\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "Release update for sync test");
+  const releaseHead = await f.git("rev-parse", "HEAD");
+  await f.git("switch", "-c", "concurrent-devel", "origin/devel");
+  await writeFile(join(f.cwd, "concurrent.txt"), "Concurrent development\n");
+  await f.git("add", ".");
+  await f.git("commit", "-m", "Concurrent work");
+  const concurrent = await f.git("rev-parse", "HEAD");
+  await f.git("push", "origin", "concurrent-devel");
+  await f.git("switch", "release");
+  const remote = await f.git("remote", "get-url", "origin");
+  const hook = join(f.cwd, ".git/hooks/pre-push");
+  // Advance the real remote after sync fetched its tip but before its first push.
+  await writeFile(hook, `#!/bin/sh\nrm "$0"\ngit --git-dir='${remote}' update-ref refs/heads/devel ${concurrent}\n`, { mode: 0o755 });
+  const result = await syncDevel({ cwd: f.cwd, releaseHead });
+  assert.equal(result.changed, true);
+  await f.bare("merge-base", "--is-ancestor", concurrent, "devel");
+  await f.bare("merge-base", "--is-ancestor", releaseHead, "devel");
+  assert.equal(await f.bare("show", "devel:concurrent.txt"), "Concurrent development");
 });
