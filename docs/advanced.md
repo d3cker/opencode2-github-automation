@@ -105,6 +105,23 @@ and unrecognized running-session errors produce errors. Recovery does not run a
 scan, resume a paused scheduler, or restart the service.
 Unlike `retry`, recovery can be queued while a different task is working.
 
+### Read-only runtime monitoring
+
+`automation.github.monitor` accepts `{}` and returns the owner directory,
+worker operation, optional active task key, scanning flag, last scan start/finish,
+optional redacted scan error, and enriched activity snapshots. It does not trigger
+work or write the queue. Worker operations are `idle`, `reconciling`, `executing`,
+`merging`, `maintenance`, or `stopped`; these are live diagnostics, not task phases.
+Scan finish means an attempt ended, including failed attempts; inspect `scanError`.
+Timing resets when the dispatcher is recreated.
+
+`automation.scheduler.status` supplies job `running`, `paused`, `nextAt`, failure
+count, error and last start/finish. The sidebar and `/botstatus` combine these APIs.
+Each poll has a four-second bound; failures retain marked stale data. The existing
+`activity` RPC/events still drive tab notifications and their ten-second fallback.
+Full task history remains available through `status`; see the
+[runtime sidebar](runtime.md#runtime-status-sidebar) for display and selection rules.
+
 ## Persistence and reconciliation
 
 The queue stores analysis decisions and clarification dialogue, comment ID, session ID, phase, pinned base branch,

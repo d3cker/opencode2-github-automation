@@ -53,6 +53,7 @@ export default Plugin.define({
         scan: async () => { controller.signal.throwIfAborted(); return dispatcher.scan(); },
         status: async () => JSON.parse(JSON.stringify(dispatcher.status())),
         activity: async () => dispatcher.activity(),
+        monitor: async () => dispatcher.monitor(),
         retry: async ({ key, restartSession }) => { controller.signal.throwIfAborted(); return { accepted: await dispatcher.retry(key, restartSession) }; },
         restartworkflow: async ({ key }) => ({ accepted: await dispatcher.restartWorkflow(key) }),
       });

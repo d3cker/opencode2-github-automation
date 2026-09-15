@@ -50,6 +50,12 @@ flowchart TD
     Stop[Owner reload or shutdown] --> Cleanup[Stop timers and local waits, settle writes, dispose RPC, release locks]
     Cleanup --> Preserve[Preserve durable queue and healthy worktree execution]
     Preserve --> Load
+    View[Runtime sidebar or botstatus] -.-> Monitor[Read dispatcher monitor and scheduler status every five seconds]
+    Monitor -.-> RPC
+    Monitor -.-> State
+    Monitor --> Fresh{Both readings available and fresh?}
+    Fresh -->|Yes| Display[Show live operations, queue and selected task]
+    Fresh -->|No| Stale[Mark unavailable or retained stale readings]
 ```
 
 - Easy configuration puts state under the shared Git directory at
@@ -469,6 +475,11 @@ flowchart TD
     UI --> Busy{Associated tab busy?}
     Busy -->|Yes| Defer[Retry closure on a later snapshot]
     Busy -->|No| Tabs[Close known task and helper tabs once, preserve sessions and worktrees]
+    Status[Independent monitor polling every five seconds] --> Sidebar[Append BOT RUNTIME to existing sidebar]
+    Selected[Selected session changes] --> Sidebar
+    Sidebar --> Details[Show owner operations and matching task, or active task fallback]
+    Status --> Missing[On failure retain last readings and mark stale]
+    Missing --> Sidebar
 ```
 
 Merge eligibility requires `done`, a tracked nonclosed PR, a saved commit, no
@@ -519,7 +530,17 @@ worktrees. A manually reopened tab is not repeatedly closed in the same TUI inst
 
 Sources: [dispatcher.ts — workOnce, mergeOnce, scanOnce](../src/dispatcher.ts),
 [approval.ts](../src/approval.ts), [github.ts — mergeApproved](../src/github.ts),
-[ui.ts](../src/ui.ts), [activity.ts](../src/activity.ts).
+[ui.ts](../src/ui.ts), [activity.ts](../src/activity.ts),
+[sidebar.ts](../src/sidebar.ts), [runtime-panel.ts](../src/runtime-panel.ts).
+
+The runtime sidebar has an independent five-second observation loop with a
+four-second request bound and one-second local countdown updates. It combines
+`automation.github.monitor` with scheduler `status`; requests never advance a
+phase. It reports actual in-process worker/scan activity rather than deriving it
+from `ready`. Last successful readings remain visible with stale warnings after
+errors or 15 seconds without fresh data. `/botstatus` exposes a text report even
+without a sidebar. See [runtime panel details](runtime.md#runtime-status-sidebar)
+for task selection, cache observations and display limits.
 
 ## 8. Status, retries, and recovery
 

@@ -216,6 +216,56 @@ Pausing stops scheduled scans; it does not cancel accepted tasks or active sessi
 Do not run independent bots on two machines against the same issues: they do not
 share queue ownership across machines.
 
+## Runtime status sidebar
+
+The **BOT RUNTIME** section is appended to the existing right sidebar, preserving
+OpenCode's context information. Open the TUI in the configured primary owner
+checkout. Switching task tabs changes the task details while the scheduler and
+dispatcher rows continue to describe that owner project.
+
+The panel shows:
+
+- Dispatcher activity: idle, reconciling state, executing a task's actual phase,
+  checking merges, maintenance, or stopped. An active task key is shown separately.
+- GitHub discovery: scanning, the time the last scan finished, and any scan error.
+- Scheduler jobs: running, paused, next run time or retry delay, and errors.
+  Pausing polling can coexist with an already-running scan or task.
+- Queue counts: ready/retry-wait excluding the active task, waiting for replies, blocked/failed and published
+  tasks, excluding closed/merged PRs. Scheduled does not mean a model is executing.
+- Task details: issue, phase, round, observed main-session status, task/base branches,
+  model, queued feedback, allocated media helper count for the current session,
+  failed attempts, recovery request, PR state and any task/merge error.
+- Separate freshness information for dispatcher and scheduler readings.
+
+Task selection prefers the displayed session (including saved earlier-round and
+helper IDs), then the dispatcher's active task, then an open waiting/blocked task,
+then scheduled work, then the last known task. Main-session running/idle comes
+from the TUI's session cache when that session is available; otherwise the panel
+says `not observed`. Media counts do not claim that those helpers are running and
+do not count native implementation subagents.
+
+Read-only snapshots refresh on startup and every five seconds, with a four-second
+request deadline and no overlapping refreshes. Countdown labels update locally
+every second. No model is prompted and polling does not restart jobs or repair
+queue state. A failed request retains the last successful snapshot with a stale
+warning; readings older than 15 seconds are also marked stale. Dispatcher and
+scheduler failures are independent, so a partial failure keeps the other component
+visible. Initial/unavailable data is never presented as a healthy idle service.
+
+Use `/botstatus` for a text report, including every known task and scheduler job,
+when the sidebar is hidden or more detail is needed. The sidebar shows up to three
+scheduler jobs and truncates long labels/errors. `/bot` opens task sessions;
+`/restartworkflow` remains the separate explicit recovery action.
+
+The TUI and owner plugin must both contain the monitor API. With an older server,
+an unloaded/unconfigured owner, a direct worktree-only launch, or a failed RPC,
+the panel reports unavailable status. Load the configured owner and update both
+sides as needed; reopen TUI clients after installation. Monitoring uses the
+connected OpenCode client, so it also works with a remote service when the correct
+owner location and updated plugin are available there. Live worker/scan diagnostics
+reset when the owner is recreated; task checkpoints and scheduler history remain
+durable as before.
+
 ## Interrupted sessions and workflow recovery
 
 If you manually continue a timed-out or interrupted bot session in the TUI,

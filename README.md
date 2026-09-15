@@ -249,6 +249,11 @@ installations are not removed by `npm uninstall --global`.
 - **Merging:** approve the bot's PR or post a configured merge phrase. The author
   must be allowed and have repository write access. Set `autoMerge.enabled` to
   `false` to disable this. `signature` controls the signature on new bot messages.
+- **Runtime status:** the right sidebar's **BOT RUNTIME** panel shows dispatcher
+  work, GitHub discovery, scheduled scans, queue counts and the selected task.
+  `/botstatus` opens a full text report. Status refreshes every five seconds;
+  unavailable or stale readings are marked explicitly. See
+  [runtime panel details](docs/runtime.md#runtime-status-sidebar).
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work

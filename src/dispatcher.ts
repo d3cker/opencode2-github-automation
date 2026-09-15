@@ -5,6 +5,7 @@ import { GithubError, Issue, Comment, type Pull } from "./github.js";
 import { Serial, redact, type Store } from "./state.js";
 import { branchText, type BranchInput, type BaseChoice } from "./branch.js";
 import { activityOf, type Activity } from "./activity.js";
+import type { DispatcherMonitor } from "./monitor.js";
 import { AnalysisDecision } from "./analysis.js";
 
 export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sessionID: z.string().optional(), purpose: z.enum(["base", "analysis"]).optional(), commentID: z.number().optional(),
@@ -80,11 +81,26 @@ export class Dispatcher {
   private scanning?: Promise<{ queued: number; ignored: number }>;
   private working?: Promise<void>;
   private maintenance?: Promise<boolean>;
+  private workerState: DispatcherMonitor["worker"] = "idle";
+  private activeTask?: string;
+  private lastScanStarted?: number;
+  private lastScanFinished?: number;
+  private scanError?: string;
   private questionPosts = new Map<string, Promise<number>>();
   constructor(private options: GithubOptions, private store: Store<Queue>, private github: GithubPort, private executor: Executor, private signal: AbortSignal, private secrets: string[] = [], private now = Date.now, private notify: (activity: Activity) => Promise<void> = async () => {}) {}
   async init() { this.queue = await this.store.load(); }
   status() { return structuredClone(this.queue.tasks); }
   activity() { return this.queue.tasks.map(activityOf); }
+  monitor(): DispatcherMonitor {
+    return { ownerDirectory: this.options.ownerDirectory,
+      worker: this.signal.aborted ? "stopped" : this.maintenance ? "maintenance" : this.workerState,
+      scanning: Boolean(this.scanning), tasks: this.activity(),
+      ...(this.activeTask ? { activeTask: this.activeTask } : {}),
+      ...(this.lastScanStarted !== undefined ? { lastScanStarted: this.lastScanStarted } : {}),
+      ...(this.lastScanFinished !== undefined ? { lastScanFinished: this.lastScanFinished } : {}),
+      ...(this.scanError ? { scanError: this.scanError } : {}),
+    };
+  }
   private async update(task: Task, patch: Partial<Task>) {
     this.signal.throwIfAborted();
     let announce = false;
@@ -100,7 +116,10 @@ export class Dispatcher {
   }
   scan() {
     if (this.scanning) return this.scanning;
-    this.scanning = this.scanOnce().finally(() => { this.scanning = undefined; });
+    this.lastScanStarted = this.now();
+    this.scanning = this.scanOnce().then(result => { this.scanError = undefined; return result; }, error => {
+      this.scanError = redact(error, this.secrets); throw error;
+    }).finally(() => { this.lastScanFinished = this.now(); this.scanning = undefined; });
     return this.scanning;
   }
   private async scanOnce() {
@@ -179,7 +198,8 @@ export class Dispatcher {
   tick(): Promise<void> {
     if (this.maintenance) return Promise.resolve();
     if (this.working) return this.working;
-    this.working = this.workOnce().finally(() => { this.working = undefined; });
+    this.workerState = "reconciling";
+    this.working = this.workOnce().finally(() => { this.working = undefined; this.workerState = "idle"; this.activeTask = undefined; });
     return this.working;
   }
   private async workOnce() {
@@ -219,7 +239,9 @@ export class Dispatcher {
     const activeSession = resumable.find(t => t.phase === "running" && t.sessionID);
     const task = activeSession ?? resumable.find(t => t.nextAt <= this.now());
     if (task && task.nextAt > this.now()) return;
-    if (!task) { await this.mergeOnce(); return; }
+    if (!task) { this.workerState = "merging"; await this.mergeOnce(); return; }
+    this.workerState = "executing";
+    this.activeTask = task.key;
     const configuredRepo = this.options.repositories.find(r => r.repo === task.repo);
     let repo = configuredRepo ? { ...configuredRepo, baseBranch: task.baseBranch ?? configuredRepo.baseBranch } : undefined;
     try {
