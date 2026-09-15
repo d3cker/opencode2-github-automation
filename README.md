@@ -252,7 +252,14 @@ installations are not removed by `npm uninstall --global`.
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work
-  on an open PR without another mention.
+  on an open PR without another mention, after the current round publishes.
+- **Recovery:** completing a stopped bot session manually is detected by the
+  dispatcher, which verifies and publishes before processing queued comments.
+  Use `/restartworkflow` in the owner project's TUI or
+  `opencode2-automation restartworkflow 'owner/repository#123'` from its primary
+  checkout to recover an eligible stopped task without discarding work. Pending
+  questions and failing checks still block progress. See
+  [workflow recovery](docs/runtime.md#interrupted-sessions-and-workflow-recovery).
 
 Keep machine-specific `.opencode/automation.json` files out of Git: global `init`
 does not add an ignore rule. See [configuration and Git branches](docs/configuration.md#configuration-files-and-git-branches)

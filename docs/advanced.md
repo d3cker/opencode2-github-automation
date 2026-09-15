@@ -77,8 +77,10 @@ node dist/manage.js restartworkflow /absolute/path/to/owner-project 'owner/repos
 `pause` stops scheduled scans and manual scheduler runs. It does not cancel queued
 work or active sessions; direct dispatcher `scan` still works.
 
-`retry` resumes blocked or failed tasks. If a session failed or prompt delivery is
-uncertain, inspect the session and worktree before explicitly starting a new one:
+`retry` clears blocked or failed status at the saved phase and requires an idle
+worker and maintenance loop. It does not append a continuation to an interrupted
+session. Prefer `restartworkflow` to continue that same session. If prompt delivery
+is uncertain, inspect the session and worktree before explicitly starting a new one:
 
 ```bash
 node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123' --restart-session
@@ -86,7 +88,7 @@ node dist/manage.js retry /absolute/path/to/owner-project 'owner/repository#123'
 
 This interrupts the previous session and reuses the worktree. It preserves code
 and already-published acknowledgement comments. An issue edited after analysis
-remains blocked for review. A new authorized comment after completion starts a
+still faces the phase-specific issue/route guards on its next execution. A new authorized comment after completion starts a
 follow-up round and updates the same open PR.
 
 `restartworkflow` (also available as `/restartworkflow` in the owner TUI) queues
@@ -95,7 +97,12 @@ the session. An interrupted session receives one checkpointed continuation
 request after it becomes idle; a completed session proceeds to verification.
 The request survives owner restarts. Uncertain delivery blocks inspection rather
 than replaying the continuation. Repeated requests while ready/running are no-ops.
-Questions, permissions, closed PRs, and missing execution routes remain guarded.
+The RPC method `automation.github.restartworkflow` accepts `{ key }` and returns
+`{ accepted }`. A true result acknowledges queuing, not completed publication.
+Known tasks not blocked/failed return false after the pending-question and closed-PR
+guards. Missing tasks, unresolved questions, closed/merged PRs, absent routes,
+and unrecognized running-session errors produce errors. Recovery does not run a
+scan, resume a paused scheduler, or restart the service.
 Unlike `retry`, recovery can be queued while a different task is working.
 
 ## Persistence and reconciliation
@@ -121,7 +128,7 @@ location are checked before renaming, and no model is prompted. Requests have a
 servers without a matching service registration skip this mechanism; use the
 shared service for unattended automation.
 
-SDK adapters may ignore AbortSignal. The plugin therefore bounds its own SDK waits,
+SDK adapters may ignore AbortSignal. The executor therefore bounds its local SDK waits,
 preserves healthy worker execution on owner disposal, and settles local state writes
 before releasing ownership. A replacement waits up to 15 seconds for the retiring
 owner's locks. RPC disposal has a five-second deadline per component; cleanup still
@@ -131,7 +138,7 @@ worktree, and session database before recovery. Reconcile an already-published P
 and saved session instead of restarting implementation or deleting the worktree.
 
 A blocked session stop is rechecked on worker passes (no more than once every
-30 seconds after an unsuccessful probe). A matching saved session with a successful
+30 seconds after an unsuccessful probe, and only when a new worker pass can start). A matching saved session with a successful
 final assistant response re-enters normal execution validation, checks, and
 publication automatically, including legacy timeout/interruption checkpoints.
 Failed checks, pending questions, and uncertain prompt delivery are not cleared.

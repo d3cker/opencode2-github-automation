@@ -8,6 +8,14 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+### Documentation
+
+- Align all eight bot workflow diagrams and runtime/recovery references with the
+  implementation, including owner lifecycle, feedback queuing, session recovery,
+  verification gates, merge polling and TUI commands.
+- Require documentation and affected diagrams to be updated with each relevant
+  implementation change in repository and bundled bot instructions.
+
 ### Fixed
 
 - Reconcile timed-out or interrupted sessions completed manually after a blocked

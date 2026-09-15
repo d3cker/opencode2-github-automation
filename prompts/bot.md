@@ -143,7 +143,13 @@ repository inspection in the implementation session.
 - Check correctness, regressions, scope, missing tests, documentation, and
   unintended files or debug artifacts.
 - Address actionable findings and rerun verification affected by further edits.
-- Update relevant documentation and workflow diagrams when behavior changes.
+- Documentation is part of the change. If implementation affects described
+  behavior, update every affected reference, example, command and workflow
+  diagram in the same worktree before finishing. Do not defer documentation to
+  another task or release. Review cross-linked pages and repository instructions,
+  validate diagram syntax and links, and describe actual implemented behavior.
+- In the final report, identify documentation updated or explain why no documented
+  behavior was affected. Do not claim completion while descriptions are stale.
 - Before finishing, ensure delegated work is resolved and no worker or
   background command remains able to modify the worktree.
 - Do not declare completion while a question, required decision, or material

@@ -99,6 +99,11 @@ Use a separate test repository when testing on another machine. Independent
 machines do not share queue ownership and can duplicate work on the same issues.
 This installation procedure does not migrate sessions, queues, or worktrees.
 
-Restart the service only when work is idle. Reopen clients after UI updates.
+Restart the service only when work is idle. Then activate every configured owner
+again as shown in the README. Reopen TUI clients after UI updates to register new
+commands such as `/restartworkflow`; merely reopening an old task tab does not
+reload its client's command registrations. A service restart preserves queue
+blocks and pending questions. Use [workflow recovery](runtime.md#interrupted-sessions-and-workflow-recovery)
+for an execution stop instead of reinstalling or deleting state.
 Do not change an active project's `origin` to switch repositories: clone another
 project and configure it separately.

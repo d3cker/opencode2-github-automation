@@ -71,17 +71,42 @@ the installation block without making remote writes. Keep its markers intact.
   installation. `examples/` contains configuration examples; `test/` contains
   automated tests. `package.json` defines build and validation commands.
 
-## Keeping documentation accurate
+## Keeping documentation accurate — required for every change
 
-Treat the implementation as the source of truth for current behavior. If code
-and documentation disagree, inspect the relevant code and tests and make the
-discrepancy explicit rather than assuming the documented behavior is implemented.
-When changing behavior, update the relevant reference page and any affected
-workflow diagrams. Keep the architecture page concise; put detailed execution
-paths in `docs/bot-workflow.md` and user-facing runtime guidance in `docs/runtime.md`.
+Documentation is part of the implementation, not a later cleanup task. **If a code
+change affects anything already described, update that description and every
+affected diagram in the same change and PR.** A change is not complete while its
+code and documentation disagree. Do not defer documentation to a later release,
+follow-up issue, or another agent.
 
-Validate changed Mermaid diagrams with a Mermaid parser when available; checking
-Markdown fences alone does not validate diagram syntax. Avoid literal semicolons
-in sequence-diagram message labels because they can be parsed as statement
-separators. For documentation-only changes, check links and formatting; application
-tests are not needed unless executable behavior also changes.
+For every code, configuration, CLI/RPC, prompt, or workflow change:
+
+1. Read the affected reference pages and compare their claims with the source and
+   relevant tests. Use the documentation map above to find all entry points.
+2. Update affected behavior, defaults, commands, examples, prerequisites, limits,
+   failure/retry paths, and recovery instructions. Check README and cross-linked
+   pages as well as the primary reference; fixing only one mention is insufficient.
+3. For automation changes, review all eight sections of `docs/bot-workflow.md`
+   for impact and update every affected Mermaid diagram and its surrounding text.
+   Show actual ordering, phase/status transitions, durable checkpoints, questions,
+   verification/publication gates, and restart paths. Do not draw desired behavior
+   as if it were implemented. Keep architecture concise and detailed paths in the
+   workflow/runtime references.
+4. Validate modified Mermaid with a parser, and check local links, headings,
+   examples and Markdown formatting. Fences alone do not prove valid diagrams.
+   Avoid literal semicolons in sequence-diagram messages. Report any validation
+   that could not be run; do not claim it passed.
+5. Before finishing, review the complete diff for code/documentation agreement.
+   In the PR description, identify the documentation updated, or state why the
+   change has no documented or user-visible behavior impact. Add accurate
+   `Unreleased` notes for changes that enter the next release.
+
+Treat implementation and verified tests as evidence of current behavior. If an
+existing discrepancy is discovered, correct the affected documentation within the
+authorized scope and make any remaining mismatch explicit. Distinguish model
+instructions from enforced runtime behavior, and branch/unreleased features from
+features already present in a published package. Do not change an unrelated
+runtime behavior merely to make an old description true.
+
+For documentation-only changes, check links, formatting and diagram syntax;
+application tests are not needed unless executable behavior also changes.
