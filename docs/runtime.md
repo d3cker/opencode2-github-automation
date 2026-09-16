@@ -197,7 +197,7 @@ before retrying; the bot does not create a replacement or discard existing work.
 Edits to existing comments and PR review comments are not supported. Closing the
 issue or closing/merging the PR blocks further rounds.
 
-Management commands run from the primary owner checkout of the target repository,
+Except for the host-wide `list` command described below, management commands run from the primary owner checkout of the target repository,
 not from a bot worktree:
 
 For source installations, replace `"$HOME/.local/bin/opencode2-automation"` with
@@ -216,9 +216,80 @@ Pausing stops scheduled scans; it does not cancel accepted tasks or active sessi
 Do not run independent bots on two machines against the same issues: they do not
 share queue ownership across machines.
 
+## Repository inventory
+
+Run these commands from **any directory**, including outside Git:
+
+```bash
+opencode2-automation list
+opencode2-automation list --json
+opencode2-automation list --discover /absolute/path/to/projects
+```
+
+`list` reads this user's registry on this host. It never starts the service,
+activates another owner, scans GitHub, retries tasks, or prompts a model. JSON
+output contains `entries` and `warnings`. In the TUI, `/bot` → **Repositories**
+shows the same inventory from the **connected server**, not the TUI client's
+machine. Select a repository for details. This option remains available when
+there are no tasks. It requires an updated, loaded owner plugin for the inventory
+RPC; otherwise use the CLI on the server. Reopen the TUI after updating it.
+
+Entries identify the GitHub repository, full checkout and owner paths, and the
+last registered base branch. Before first activation an automatic branch may
+say `auto (resolved on activation)`; task-specific base overrides are still shown
+in task details. Advanced configurations with multiple repositories list each
+configured repository, sharing the owner's scheduler information.
+
+The report includes dispatcher activity, last scan attempt completion (which can
+include failure), scheduler next-run timestamps, task counts and every open
+blocked/failed/closing issue key and saved error. Active counts use the actual
+active task; scheduled work is separate. Closed local tracking and closed/merged
+PR history do not inflate counts. A working dispatcher can have blocked tasks;
+inspect the task counts as well as the owner status.
+
+| Status | Meaning |
+| --- | --- |
+| `running` | Fresh dispatcher and scheduler snapshots; at least one polling job is unpaused. This does not promise that all tasks succeeded. |
+| `paused` | Both snapshots are fresh and all scheduler jobs are paused. Accepted tasks can still execute. |
+| `error` | A fresh dispatcher reports stopped/scan failure, a scheduler job has failures, or the standard configuration is invalid/unreadable. |
+| `not-running` | No dispatcher snapshot yet, an explicit shutdown snapshot, or its process no longer exists. |
+| `unavailable` | Missing, corrupt or stale component status, or an inaccessible directory. Do not infer idleness. |
+| `missing` | A registered checkout/owner directory was removed or moved. |
+| `unconfigured` | Its registered standard configuration file was removed. A previously loaded runtime may still be active until reloaded. |
+
+Each component publishes a local snapshot every five seconds. A reading older
+than 15 seconds is unavailable, even if its process still exists. Timestamps are
+shown in UTC. Stopped/stale entries retain **historical** details; counts and next
+run times in those snapshots are not live promises. Open the list again to refresh
+it. Inventory errors do not reset queues or prevent bot execution.
+
+`init` registers new projects. Loading an updated combined plugin imports its
+existing standard configuration; the dispatcher also registers advanced
+`repositories` options. To include older **inactive** standard configurations,
+run `list --discover <root>`. Discovery only reads Git/config files and adds
+registry metadata: no credentials, GitHub calls, or service activation are needed.
+It examines the root plus six directory levels, at most 10,000 directories,
+without following child symlinks or descending into hidden directories,
+`node_modules`, `vendor`, `build`, or `dist`. Worktrees and subdirectories of a Git
+checkout are excluded. Limits, unreadable folders and invalid configs are
+reported. Choose a more specific root (including a hidden folder directly) when
+needed. Advanced options require loading their owner once. This is an inventory
+of registered/configured projects, not an exhaustive filesystem or other-user
+scan.
+
+Registration is per canonical owner path under
+`$XDG_STATE_HOME/opencode2-automation/repositories`, defaulting to
+`$HOME/.local/state/opencode2-automation/repositories`. CLI and service must use
+the same user and state-home environment. Per-owner atomic files avoid lost
+updates when different projects register concurrently. Aliases of one owner are
+deduplicated; separate clones remain separate. Missing entries are retained so
+the operator can see what disappeared. The registry never replaces the queue or
+session database, and `list --discover` does not rewrite project configuration.
+
 ## Manage tasks from /bot
 
-Run `/bot` in the owner project's TUI, choose an issue, then choose an action:
+Run `/bot` in the owner project's TUI, choose an issue, then choose an action.
+The same picker also offers **Repositories** for the host inventory:
 
 - **Open session**: inspect its saved conversation, including a locally closed task.
 - **Show details**: read the saved status, phase, error, branch, worktree, session,

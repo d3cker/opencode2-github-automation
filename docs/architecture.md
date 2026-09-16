@@ -16,6 +16,12 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
   session history, and exposes `/bot` and `/restartworkflow` task selectors.
   A read-only runtime sidebar and `/botstatus` combine live dispatcher diagnostics,
   scheduler state and task snapshots, marking stale or unavailable data.
+- **Repository inventory:** `init` and owner activation register configured
+  checkouts in a per-user host registry. Dispatcher and scheduler publish separate
+  local status snapshots every five seconds. CLI `list` reads these without
+  activating owners; `/bot` → **Repositories** reads the connected server's same
+  registry through `automation.github.repositories`. Missing/stale data is explicit;
+  discovery can import inactive standard configs without starting automation.
 
 ## Workflow
 

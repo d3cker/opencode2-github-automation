@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode/plugin/tui";
 import { GithubRpc } from "./rpc.js";
+import { plain, repositoryDetails } from "./repository-report.js";
 import { Activity } from "./activity.js";
 
 export function setupUI(context: Plugin.Context) {
@@ -74,11 +75,28 @@ export function setupUI(context: Plugin.Context) {
       run: async () => {
         await sync(true);
         const rows = [...states.values()].reverse();
-        if (!rows.length) { context.ui.toast.show({ message: "No bot tasks in this project.", variant: "info" }); return; }
         const selected = await context.ui.dialog.select({
-          title: "Bot tasks", options: rows.map(a => ({ title: `${a.key} · ${a.status}`, description: a.error ?? `Round ${a.round} · ${a.phase}`, value: a.key })),
+          title: "Bot tasks", options: [
+            ...rows.map(a => ({ title: `${a.key} · ${a.status}`, description: a.error ?? `Round ${a.round} · ${a.phase}`, value: a.key })),
+            { title: "Repositories", description: "Configured folders and bot status on the connected server", value: "repositories" },
+          ],
         });
         if (!selected || stopped) return;
+        if (selected === "repositories") {
+          try {
+            const report = await rpc.repositories({}, { location, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
+            if (stopped) return;
+            if (report.warnings.length) await context.ui.dialog.alert({ title: "Repository inventory warnings", message: report.warnings.map(plain).join("\n") });
+            if (!report.entries.length) { await context.ui.dialog.alert({ title: "Repositories", message: "No registered repositories. Run opencode2-automation list --discover /path/to/projects on the server to import older configurations." }); return; }
+            const choice = await context.ui.dialog.select({ title: "Repositories — connected server", options: report.entries.map((r, i) => ({ title: plain(`${r.repo} · ${r.status}`), description: plain(r.directory), value: String(i) })) });
+            if (choice === undefined || stopped) return;
+            const row = report.entries[Number(choice)];
+            if (row) await context.ui.dialog.alert({ title: plain(row.repo), message: repositoryDetails(row) });
+          } catch {
+            if (!stopped) await context.ui.dialog.alert({ title: "Repositories unavailable", message: "Update/load the owner plugin, or run opencode2-automation list on the server. No repositories were started." });
+          }
+          return;
+        }
         const activity = states.get(selected);
         if (!activity) return;
         const terminal = ["closing", "closed"].includes(activity.status);

@@ -122,6 +122,31 @@ Each poll has a four-second bound; failures retain marked stale data. The existi
 Full task history remains available through `status`; see the
 [runtime sidebar](runtime.md#runtime-status-sidebar) for display and selection rules.
 
+### Host repository inventory
+
+`opencode2-automation list [--json]` is independent of the current checkout and
+service discovery. `automation.github.repositories` accepts `{}` and returns the
+same `{ entries, warnings }` report on the connected server. The method reads
+local registry/snapshot files; it does not invoke RPC in other owner locations,
+which could activate their plugins. `/bot` → **Repositories** consumes this API.
+
+`init` and combined-plugin activation register standard configurations. Dispatcher
+startup registers all advanced `repositories` entries under its canonical owner.
+Dispatcher and scheduler write separate atomic snapshots every five seconds while
+they hold their existing ownership locks, with PID, timestamp and shutdown state.
+Disposal settles the last snapshot before releasing ownership. Readers verify
+process existence and 15-second freshness; stale details remain historical.
+Snapshot/registration errors are reported but do not abort execution or alter
+queue state. The registry uses private files under `XDG_STATE_HOME` (default
+`~/.local/state`), separate from Git-backed state; no GitHub token or model
+credentials are stored there.
+
+Use `list --discover /absolute/path/to/projects` to register older inactive
+standard `.opencode/automation.json` configurations without loading owners.
+Discovery has explicit filesystem/depth limits and does not import arbitrary
+advanced plugin options. For statuses and migration details, see
+[repository inventory](runtime.md#repository-inventory).
+
 ## Persistence and reconciliation
 
 The queue stores analysis decisions and clarification dialogue, comment ID, session ID, phase, pinned base branch,
