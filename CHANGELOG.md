@@ -18,6 +18,10 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Keep repository inventory RPC responses valid JSON when an owner has no runtime
+  snapshots. Isolate setup-test registries so validation never adds fixture
+  repositories to the operator's inventory.
+
 - Reconcile timed-out or interrupted sessions completed manually after a blocked
   task or service restart. Verify and publish through the dispatcher, then process
   queued issue feedback on the same branch and PR, including legacy checkpoints.

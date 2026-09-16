@@ -109,7 +109,10 @@ export async function listRepositories(now = Date.now()): Promise<RepositoryRepo
         report.entries.push(row);
         try {
           const [d, s] = await Promise.all([readRuntime(entry.ownerDirectory, "dispatcher"), readRuntime(entry.ownerDirectory, "scheduler")]);
-          row.dispatcher = d?.dispatcher; row.dispatcherAt = d?.at; row.scheduler = s?.scheduler; row.schedulerAt = s?.at;
+          // The RPC transport validates JSON before its output schema. Absent
+          // snapshots must be omitted, never assigned as explicit undefined.
+          if (d?.dispatcher) { row.dispatcher = d.dispatcher; row.dispatcherAt = d.at; }
+          if (s?.scheduler) { row.scheduler = s.scheduler; row.schedulerAt = s.at; }
           const fresh = (v?: Runtime) => Boolean(v && !v.stopped && alive(v.pid) && now >= v.at && now - v.at <= 15000);
           if (!d || d.stopped || !alive(d.pid)) {
             row.status = "not-running"; row.reason = "Configured; dispatcher is not running or has not reported since registration. Snapshots, if present, are historical.";
