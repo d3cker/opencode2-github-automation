@@ -16,6 +16,7 @@ export const GithubRpc = Rpc.define({
     monitor: { input: z.object({}).strict(), output: DispatcherMonitor },
     activity: { input: z.object({}).strict(), output: z.array(Activity) },
     retry: { input: z.object({ key: z.string(), restartSession: z.boolean().default(false) }), output: z.object({ accepted: z.boolean() }) },
+    close: { input: z.object({ key: z.string() }).strict(), output: z.object({ accepted: z.boolean() }) },
     restartworkflow: { input: z.object({ key: z.string() }).strict(), output: z.object({ accepted: z.boolean() }) },
   },
 });

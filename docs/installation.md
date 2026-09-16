@@ -119,7 +119,7 @@ This installation procedure does not migrate sessions, queues, or worktrees.
 
 Restart the service only when work is idle. Then activate every configured owner
 again as shown in the README. Reopen TUI clients after UI updates to register new
-commands such as `/restartworkflow`; merely reopening an old task tab does not
+commands and action menus such as `/bot` task closure and `/restartworkflow`; merely reopening an old task tab does not
 reload its client's command registrations. A service restart preserves queue
 blocks and pending questions. Use [workflow recovery](runtime.md#interrupted-sessions-and-workflow-recovery)
 for an execution stop instead of reinstalling or deleting state.

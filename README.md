@@ -254,6 +254,10 @@ installations are not removed by `npm uninstall --global`.
   `/botstatus` opens a full text report. Status refreshes every five seconds;
   unavailable or stale readings are marked explicitly. See
   [runtime panel details](docs/runtime.md#runtime-status-sidebar).
+- **Task management:** `/bot` lets you open a session, inspect details, close idle
+  tabs, restart a stopped workflow, or stop sessions and end task tracking. Closing
+  tracking preserves all local work and history, works without a surviving GitHub
+  issue/PR, and prevents rediscovery. See [task management](docs/runtime.md#manage-tasks-from-bot).
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work

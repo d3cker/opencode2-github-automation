@@ -216,6 +216,45 @@ Pausing stops scheduled scans; it does not cancel accepted tasks or active sessi
 Do not run independent bots on two machines against the same issues: they do not
 share queue ownership across machines.
 
+## Manage tasks from /bot
+
+Run `/bot` in the owner project's TUI, choose an issue, then choose an action:
+
+- **Open session**: inspect its saved conversation, including a locally closed task.
+- **Show details**: read the saved status, phase, error, branch, worktree, session,
+  PR link and queued feedback. These are stored checkpoints, not a fresh GitHub lookup.
+- **Close session tabs**: hide that task's idle tabs in this TUI only. Busy tabs
+  remain open. Tracking and execution continue.
+- **Restart workflow**: request the same guarded recovery as `/restartworkflow`.
+- **Stop and close task**: after confirmation, persist `closing`, interrupt known
+  main, earlier-round and media sessions, wait for idleness and the task's in-flight
+  worker operation, then persist `closed`. The menu offers **Retry closing task**
+  while closure is pending.
+
+Closing tracking works for queued, waiting, failed, blocked, running and published
+work, even if its GitHub issue/PR or saved OpenCode session no longer exists.
+It makes no GitHub close/delete request and preserves files, branches, worktrees,
+commits, session history, pending questions and feedback. It does not publish
+unfinished work. `closed` here means **local tracking ended**, not PR closure.
+Closed tasks remain listed as history and their conversations can be reopened.
+
+The closed record prevents rediscovery and later comments from restarting the
+same issue. Recovery/retry cannot reopen tracking; create a new issue for new
+bot work. Runtime question/helper admission is disabled once closure is requested.
+Related idle tabs close once when the task becomes `closed`.
+
+An already-started publication or automatic merge rejects closure with an explicit
+message: wait for it to finish and try again. Other in-flight operations (such as
+analysis, worktree preparation or checks) may finish locally before closure
+completes, but cannot advance to publication. An already-submitted GitHub comment
+may complete. Closing is not a rollback of earlier Git or GitHub effects.
+
+Interruption errors keep the task in `closing` with a visible error, retried after
+30 seconds or through **Retry closing task**. A restart resumes the saved closure
+instead of restarting implementation. No success is reported while interruption
+has failed or the task's worker operation is still pending. Missing sessions are
+already stopped and do not block closure.
+
 ## Runtime status sidebar
 
 The **BOT RUNTIME** section is appended to the existing right sidebar, preserving
@@ -231,7 +270,9 @@ The panel shows:
 - Scheduler jobs: running, paused, next run time or retry delay, and errors.
   Pausing polling can coexist with an already-running scan or task.
 - Queue counts: ready/retry-wait excluding the active task, waiting for replies, blocked/failed and published
-  tasks, excluding closed/merged PRs. Scheduled does not mean a model is executing.
+  tasks, excluding closed/merged PRs and locally closed tracking. Scheduled does not mean a model is executing.
+  Up to three attention rows identify blocked, failed or closing issue keys and
+  saved errors. Pending closures have a separate count; use `/bot` for the full list.
 - Task details: issue, phase, round, observed main-session status, task/base branches,
   model, queued feedback, allocated media helper count for the current session,
   failed attempts, recovery request, PR state and any task/merge error.
@@ -254,7 +295,7 @@ visible. Initial/unavailable data is never presented as a healthy idle service.
 
 Use `/botstatus` for a text report, including every known task and scheduler job,
 when the sidebar is hidden or more detail is needed. The sidebar shows up to three
-scheduler jobs and truncates long labels/errors. `/bot` opens task sessions;
+scheduler jobs and truncates long labels/errors. `/bot` manages task sessions;
 `/restartworkflow` remains the separate explicit recovery action.
 
 The TUI and owner plugin must both contain the monitor API. With an older server,
@@ -311,3 +352,7 @@ identity, so use it only after inspecting the session and uncertain prompt
 results. `/restartworkflow` retains the session. Neither recovery command replaces
 service startup or scheduler `resume`. The slash command belongs in OpenCode's
 TUI, not in an issue comment.
+
+While a closure is pending, the dispatcher does not start another worker pass.
+An unrelated already-running task can finish; scanning continues for other tasks.
+The monitor reports task maintenance until closure completes.

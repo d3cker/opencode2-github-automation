@@ -24,6 +24,13 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Added
 
+- Manage tasks directly from `/bot`: inspect details, open sessions, close idle
+  tabs, restart workflows, or stop sessions and durably end tracking without
+  deleting work. Preserve closed tasks as history and skip rediscovery, feedback,
+  runtime hooks and publication after closure, including missing issue/PR cases.
+- Identify blocked, failed and closing issue keys and errors in the runtime
+  sidebar instead of showing only an anonymous attention counter.
+
 - Add a live BOT RUNTIME sidebar and `/botstatus` report with dispatcher operations,
   scheduler scans/retries, queue counts and selected-task details. Keep stale and
   unavailable readings explicit; monitor through read-only owner-scoped RPC.

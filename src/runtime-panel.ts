@@ -59,9 +59,9 @@ export function selectedTask(snapshot: RuntimeSnapshot, sessionID?: string): Act
   const tasks = snapshot.dispatcher?.tasks ?? [];
   return tasks.find(t => sessionID && (t.sessionID === sessionID || t.sessionIDs?.includes(sessionID)))
     ?? tasks.find(t => t.key === snapshot.dispatcher?.activeTask)
-    ?? tasks.find(t => ["waiting", "blocked", "failed"].includes(t.status) && t.prState !== "closed")
+    ?? tasks.find(t => ["closing", "waiting", "blocked", "failed"].includes(t.status) && t.prState !== "closed")
     ?? tasks.find(t => ["ready", "retry_wait"].includes(t.status))
-    ?? tasks.at(-1);
+    ?? tasks.filter(t => t.status !== "closed").at(-1);
 }
 export function runtimeLines(snapshot: RuntimeSnapshot, now: number, sessionID?: string, sessionStatus?: string): PanelLine[] {
   const lines: PanelLine[] = [{ text: "BOT RUNTIME", tone: "heading" }];
@@ -71,15 +71,17 @@ export function runtimeLines(snapshot: RuntimeSnapshot, now: number, sessionID?:
   if (!d) lines.push({ text: snapshot.dispatcherError ? "Dispatcher unavailable" : "Connecting to owner…", tone: snapshot.dispatcherError ? "warning" : "muted" });
   else {
     const active = d.tasks.find(t => t.key === d.activeTask);
-    const worker = d.worker === "executing" ? phaseNames[active?.phase ?? ""] ?? "Working" : ({ idle: "Idle", reconciling: "Reconciling state", merging: "Checking merges", maintenance: "Recovery maintenance", stopped: "Stopped" }[d.worker]);
+    const worker = d.worker === "executing" ? phaseNames[active?.phase ?? ""] ?? "Working" : ({ idle: "Idle", reconciling: "Reconciling state", merging: "Checking merges", maintenance: "Task maintenance", stopped: "Stopped" }[d.worker]);
     lines.push({ text: `${stale ? "Last dispatcher" : "Dispatcher"}: ${worker}`, tone: stale || d.worker === "stopped" ? "warning" : undefined });
     if (d.activeTask) lines.push({ text: safe(d.activeTask, 65), tone: "muted" });
     lines.push({ text: `${stale ? "Last scan" : "Discovery"}: ${d.scanning ? "scanning GitHub" : ago(d.lastScanFinished, now)}`, tone: d.scanError ? "warning" : "muted" });
     if (d.scanError) lines.push({ text: safe(d.scanError), tone: "error" });
-    const open = d.tasks.filter(t => t.prState !== "closed" && t.phase !== "merged");
+    const open = d.tasks.filter(t => t.status !== "closed" && (t.status === "closing" || t.prState !== "closed" && t.phase !== "merged"));
     const count = (states: string[]) => open.filter(t => states.includes(t.status)).length;
     const scheduled = open.filter(t => ["ready", "retry_wait"].includes(t.status) && t.key !== d.activeTask).length;
     lines.push({ text: `Queue: ${scheduled} scheduled · ${count(["waiting"])} waiting`, tone: "muted" });
+    for (const task of open.filter(t => ["blocked", "failed", "closing"].includes(t.status)).slice(0, 3)) lines.push({ text: `${safe(task.key, 55)}: ${task.status} · ${safe(task.error ?? "Stopping sessions", 90)}`, tone: "warning" });
+    if (count(["closing"])) lines.push({ text: `${count(["closing"])} closing · /bot to manage`, tone: "warning" });
     lines.push({ text: `${count(["blocked", "failed"])} blocked/failed · ${count(["done"])} published`, tone: count(["blocked", "failed"]) ? "warning" : "muted" });
   }
   if (!jobs) lines.push({ text: snapshot.schedulerError ? "Scheduler unavailable" : "Scheduler: connecting…", tone: snapshot.schedulerError ? "warning" : "muted" });

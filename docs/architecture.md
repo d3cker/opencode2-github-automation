@@ -70,3 +70,10 @@ activity snapshots. Scheduler status retains its existing RPC. The TUI polls bot
 independently every five seconds through the connected client; it does not infer
 worker activity from queue status alone. These live diagnostics do not add durable
 workflow phases or replace the existing ownership keepalive.
+
+Operator task closure is a durable dispatcher operation: `/bot` sends the owner
+`automation.github.close`, which records `closing` before interruption and later
+`closed`. Closed records remain as history and prevent rediscovery; scans, runtime
+hooks, feedback execution and merge monitoring exclude them. Session/worktree
+data is retained. See [task management](runtime.md#manage-tasks-from-bot) for
+in-flight operation limits and the distinction from closing a TUI tab.

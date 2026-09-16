@@ -16,11 +16,13 @@ export function setupUI(context: Plugin.Context) {
     if (stopped) return;
     const activity = Activity.parse(raw);
     if ((states.get(activity.key)?.round ?? 0) > activity.round) return;
+    if (["closing", "closed"].includes(states.get(activity.key)?.status ?? "") && !["closing", "closed"].includes(activity.status)) return;
+    if (states.get(activity.key)?.status === "closed" && activity.status === "closing") return;
     states.set(activity.key, activity);
     const known = sessions.get(activity.key) ?? new Set<string>();
     for (const id of [...(activity.sessionIDs ?? []), ...(activity.sessionID ? [activity.sessionID] : [])]) known.add(id);
     sessions.set(activity.key, known);
-    if (activity.prState === "closed" || activity.phase === "merged") {
+    if (activity.status === "closed" || activity.prState === "closed" || activity.phase === "merged") {
       // Closing a tab preserves its session. Handle each tab once so a person
       // can reopen it from /bot or history without the next poll closing it.
       seen.add(`${activity.key}:${activity.round}:started`);
@@ -67,7 +69,7 @@ export function setupUI(context: Plugin.Context) {
     context.keymap.layer(() => ({
     mode: "global",
     commands: [{
-      id: "automation.sessions", title: "Bot: show issue tasks", group: "Bot", palette: true,
+      id: "automation.sessions", title: "Bot: manage issue tasks", group: "Bot", palette: true,
       slash: { name: "bot" },
       run: async () => {
         await sync(true);
@@ -78,11 +80,56 @@ export function setupUI(context: Plugin.Context) {
         });
         if (!selected || stopped) return;
         const activity = states.get(selected);
-        if (!activity?.sessionReady || !activity.sessionID) {
-          await context.ui.dialog.alert({ title: selected, message: activity?.error ?? "The session has not started yet." }); return;
+        if (!activity) return;
+        const terminal = ["closing", "closed"].includes(activity.status);
+        const action = await context.ui.dialog.select({ title: `${selected} · ${activity.status}`, options: [
+          { title: "Open session", description: "Inspect the saved conversation and work", value: "open" },
+          { title: "Show details", description: "Status, error, branch, session and PR", value: "details" },
+          { title: "Close session tabs", description: "Hide idle tabs only; the bot keeps tracking this task", value: "tabs" },
+          ...(!terminal ? [{ title: "Restart workflow", description: "Resume an eligible stopped task, preserving work", value: "restart" }] : []),
+          ...(activity.status !== "closed" ? [{ title: activity.status === "closing" ? "Retry closing task" : "Stop and close task", description: "Stop known bot sessions and end tracking; preserve all local work and history", value: "close" }] : []),
+        ] });
+        if (!action || stopped) return;
+        try {
+          if (action === "details") {
+            await context.ui.dialog.alert({ title: selected, message: [
+              `Status: ${activity.status} · phase: ${activity.phase} · round: ${activity.round}`,
+              `Error: ${activity.error ?? "none"}`, `Session: ${activity.sessionID ?? "not created"}`,
+              `Branch: ${activity.branch ?? "unknown"}`, `Worktree: ${activity.worktree ?? "not created"}`,
+              `PR: ${activity.prURL ?? "none"}`, `Queued feedback: ${activity.pendingFeedback ?? 0}`,
+              ...(activity.status === "closed" ? ["Tracking ended locally. GitHub issue/PR and local work were preserved."] : []),
+            ].join("\n") });
+          } else if (action === "tabs") {
+            const ids = sessions.get(selected) ?? new Set<string>();
+            let busy = 0;
+            for (const tab of context.ui.tabs.list()) {
+              if (!ids.has(tab.sessionID)) continue;
+              if (tab.busy || !context.ui.tabs.close(tab.sessionID)) busy++;
+            }
+            context.ui.toast.show({ message: busy ? "Busy tabs remain open. Use Stop and close task to stop execution." : "Session tabs closed. Task tracking is unchanged.", variant: "info" });
+          } else if (action === "close") {
+            const confirmed = await context.ui.dialog.select({ title: `Stop and close ${selected}?`, options: [
+              { title: "Cancel", description: "Leave this task unchanged", value: "cancel" },
+              { title: "Stop sessions and end tracking", description: "Preserve files, branch, worktree and history. Do not close the GitHub issue or PR. New comments will not restart this task.", value: "confirm" },
+            ] });
+            if (confirmed !== "confirm" || stopped) return;
+            const result = await rpc.close({ key: selected }, { location, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) });
+            context.ui.toast.show({ message: result.accepted ? `${selected}: closure queued. Waiting for sessions and in-flight work to stop.` : `${selected}: task tracking is already closed.`, variant: "info", duration: 8000 });
+            await sync(true);
+          } else if (action === "restart") {
+            const result = await rpc.restartworkflow({ key: selected }, { location, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) });
+            context.ui.toast.show({ message: result.accepted ? `${selected}: recovery queued from the saved stage.` : `${selected}: no recovery needed.`, variant: "info" });
+            await sync(true);
+          } else if (action === "open") {
+            if (!activity.sessionReady || !activity.sessionID) {
+              await context.ui.dialog.alert({ title: selected, message: "The session has not started yet. Use Stop and close task to end tracking." }); return;
+            }
+            await context.data.session.sync(activity.sessionID);
+            if (!context.ui.tabs.focus(activity.sessionID)) context.ui.router.navigate({ type: "session", sessionID: activity.sessionID });
+          }
+        } catch (error) {
+          await context.ui.dialog.alert({ title: selected, message: error instanceof Error ? error.message : "Task action failed. Refresh /bot and retry." });
         }
-        await context.data.session.sync(activity.sessionID);
-        if (!context.ui.tabs.focus(activity.sessionID)) context.ui.router.navigate({ type: "session", sessionID: activity.sessionID });
       },
     }, {
       id: "automation.restartworkflow", title: "Bot: restart saved workflow", group: "Bot", palette: true,

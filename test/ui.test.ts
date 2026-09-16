@@ -6,7 +6,8 @@ import type { Activity } from "../src/activity.js";
 
 const activity: Activity = { key: "owner/repo#1", repo: "owner/repo", issueNumber: 1, round: 1, phase: "running", status: "ready", sessionID: "ses_test", sessionReady: true, worktree: "/worktree" };
 function fixture(initial: Activity[] = [], restored: string[] = []) {
-  const recovered: string[] = [], alerts: unknown[] = [];
+  const recovered: string[] = [], alerts: unknown[] = [], ended: string[] = [];
+  const choices: (string | undefined)[] = [];
   let recoveryError: Error | undefined;
   const commands = new Map<string, () => Promise<void>>();
   const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [], closed: string[] = [];
@@ -16,7 +17,7 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
     location: { directory: "/repo" },
-    client: { rpc: () => ({ activity: async () => initial, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
+    client: { rpc: () => ({ activity: async () => initial, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
     data: { session: { sync: async () => {} } },
     keymap: { layer: (get: () => { commands: { slash: { name: string }; run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; for (const cmd of get().commands) commands.set(cmd.slash.name, cmd.run); } },
     ui: {
@@ -28,11 +29,11 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
         close: (id: string) => { assert.equal(typeof id, "string"); if (!tabs.delete(id)) return false; closed.push(id); return true; },
       },
       router: { navigate: (value: unknown) => navigated.push(value) },
-      dialog: { select: async () => activity.key, alert: async (value: unknown) => { alerts.push(value); } },
+      dialog: { select: async (input: { options: { value: string }[] }) => choices.length ? choices.shift() : input.options.some(o => o.value === activity.key) ? activity.key : "open", alert: async (value: unknown) => { alerts.push(value); } },
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -125,5 +126,28 @@ test("/restartworkflow sends the selected task to its owner and displays recover
     await f.restart();
     assert.match(JSON.stringify(f.alerts.at(-1)), /pending question/);
     assert.equal(f.recovered.length, 1);
+  } finally { f.stop(); }
+});
+
+test("/bot closes tracking only after confirmation and keeps closed sessions accessible", async () => {
+  const f = fixture([{ ...activity, status: "blocked" }], ["ses_test"]);
+  try {
+    await new Promise(r => setImmediate(r));
+    f.choose(activity.key, "close", "cancel"); await f.command(); assert.deepEqual(f.ended, []);
+    f.choose(activity.key, "close", "confirm"); await f.command(); assert.deepEqual(f.ended, [activity.key]);
+    f.event({ ...activity, status: "closed" }); assert.deepEqual(f.closed, ["ses_test"]);
+    f.event(activity); assert.deepEqual(f.opened, []);
+    f.choose(activity.key, "open"); await f.command(); assert.equal(f.navigated.length, 1);
+  } finally { f.stop(); }
+});
+
+test("/bot can close tracking before a session exists and tab-only closure never calls the owner", async () => {
+  const f = fixture([{ ...activity, sessionID: undefined, sessionReady: false, status: "blocked" }]);
+  try {
+    await new Promise(r => setImmediate(r));
+    f.choose(activity.key, "close", "confirm"); await f.command(); assert.equal(f.ended.length, 1);
+    f.event(activity); f.tabs.get("ses_test")!.busy = true;
+    f.choose(activity.key, "tabs"); await f.command(); assert.equal(f.closed.length, 0); assert.equal(f.ended.length, 1);
+    assert.match(JSON.stringify(f.toasts.at(-1)), /Busy tabs/);
   } finally { f.stop(); }
 });
