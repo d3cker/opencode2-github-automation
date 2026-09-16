@@ -182,3 +182,28 @@ API references: [OpenCode 2 plugins](https://opencode.ai/v2/docs/build/plugins),
 [GitHub issues](https://docs.github.com/en/rest/issues/issues),
 [comments](https://docs.github.com/en/rest/issues/comments),
 and [pull requests](https://docs.github.com/en/rest/pulls/pulls).
+
+## Ending task tracking
+
+Use `/bot` → select issue → **Stop and close task**. The owner-scoped RPC is
+`automation.github.close` with `{ "key": "owner/repository#123" }`, returning
+`{ "accepted": true }` when durable closure is queued or `false` if already closed.
+There is no corresponding setup CLI subcommand. This action does not require the
+GitHub issue/PR or saved session to still exist. It never deletes local work.
+
+The queue retains phase and history with statuses `closing` and `closed`,
+`closeRequestedAt`, `closedAt`, and `closeError`. Interruption of all saved main,
+earlier-round and media session IDs is bounded to 15 seconds per request; missing
+sessions are ignored, other failures retry no sooner than 30 seconds. Closure
+waits for the selected task's in-flight worker and question posts, then interrupts
+again to cover a session creation that was already in flight. Checkpoint guards
+prevent late results from publishing or reviving the task. Publication/merge
+already in flight rejects admission, rather than promising to undo remote effects.
+
+Pending closure is resumed on startup. Keep the queue and Git worktree backups
+when upgrading: older plugin builds do not understand these two new statuses.
+See [runtime management](runtime.md#manage-tasks-from-bot) for the UI and limits.
+
+While a closure is pending, the dispatcher does not start another worker pass.
+An unrelated already-running task can finish; scanning continues for other tasks.
+The monitor reports task maintenance until closure completes.

@@ -299,3 +299,27 @@ test("a real wait deadline records a recoverable session stop and interrupts onc
     assert.equal(interrupts, 1);
   } finally { clearTimeout(timer); }
 });
+
+test("task closure interrupts all saved sessions, tolerates missing ones and waits for idleness", async () => {
+  const interrupted: string[] = [], waited: string[] = [];
+  const ctx = { session: {
+    interrupt: async ({ sessionID }: { sessionID: string }) => { interrupted.push(sessionID); if (sessionID === "gone") throw { _tag: "Session.NotFoundError" }; },
+    wait: async ({ sessionID }: { sessionID: string }) => { waited.push(sessionID); },
+  } } as unknown as Plugin.Context;
+  const t = { ...task(), sessionID: "main", sessionIDs: ["main", "previous", "gone"], helpers: [{ id: "media", parentID: "main", capability: "vision" as const }] };
+  await new OpenCodeExecutor(ctx, options, new AbortController().signal).cancel(t, true);
+  assert.deepEqual(interrupted.sort(), ["gone", "main", "media", "previous"]);
+  assert.deepEqual(waited.sort(), ["main", "media", "previous"]);
+});
+
+test("closing after a checkpoint prevents a late implementation prompt", async () => {
+  let prompts = 0;
+  const t = { ...task(), sessionID: "existing", sessionReady: true };
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" } }),
+    prompt: async () => { prompts++; },
+  } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+  await assert.rejects(executor.run(t, async patch => { Object.assign(t, patch); if (patch.promptAttempted) t.status = "closing"; }), /tracking is closed/);
+  assert.equal(prompts, 0);
+});

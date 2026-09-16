@@ -14,8 +14,9 @@ export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sess
 const Phase = z.enum(["queued", "analyzing", "commented", "running", "verifying", "publishing", "pr_opened"]);
 export const Task = z.object({
   key: z.string(), repo: z.string(), issue: Issue, route: Route.optional(),
-  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done", "waiting"]),
+  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done", "waiting", "closing", "closed"]),
   attempts: z.number(), nextAt: z.number(), createdAt: z.number(),
+  closeRequestedAt: z.number().optional(), closedAt: z.number().optional(), closeError: z.string().optional(),
   analysis: z.string().optional(), commentID: z.number().optional(),
   analysisDecision: AnalysisDecision.optional(),
   analysisDialogue: z.array(z.object({ question: z.string(), answer: Comment })).optional(),
@@ -43,6 +44,9 @@ export type Queue = z.infer<typeof Queue>;
 export class Blocked extends Error {}
 export class SessionStopped extends Blocked {}
 export class WaitingForAnswer extends Error {}
+class TaskClosed extends Error {}
+const closing = (task: Task) => task.status === "closing" || task.status === "closed";
+function requireTracked(task: Task) { if (closing(task)) throw new TaskClosed("Task tracking has been closed"); }
 
 function stoppedSession(task: Task) {
   // Recognize checkpoints from releases before sessionStopped was persisted.
@@ -71,7 +75,7 @@ export interface Executor {
   run(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>): Promise<void>;
   verify(task: Task, repo: Repository): Promise<{ checks: string[]; commit: string }>;
   push(task: Task, repo: Repository): Promise<void>;
-  cancel(task: Task): Promise<void>;
+  cancel(task: Task, related?: boolean): Promise<void>;
   completed?(task: Task): Promise<boolean>;
 }
 
@@ -86,6 +90,8 @@ export class Dispatcher {
   private lastScanStarted?: number;
   private lastScanFinished?: number;
   private scanError?: string;
+  private closures = new Map<string, Promise<void>>();
+  private publishing = new Set<string>();
   private questionPosts = new Map<string, Promise<number>>();
   constructor(private options: GithubOptions, private store: Store<Queue>, private github: GithubPort, private executor: Executor, private signal: AbortSignal, private secrets: string[] = [], private now = Date.now, private notify: (activity: Activity) => Promise<void> = async () => {}) {}
   async init() { this.queue = await this.store.load(); }
@@ -93,7 +99,7 @@ export class Dispatcher {
   activity() { return this.queue.tasks.map(activityOf); }
   monitor(): DispatcherMonitor {
     return { ownerDirectory: this.options.ownerDirectory,
-      worker: this.signal.aborted ? "stopped" : this.maintenance ? "maintenance" : this.workerState,
+      worker: this.signal.aborted ? "stopped" : this.maintenance || this.queue.tasks.some(t => t.status === "closing") ? "maintenance" : this.workerState,
       scanning: Boolean(this.scanning), tasks: this.activity(),
       ...(this.activeTask ? { activeTask: this.activeTask } : {}),
       ...(this.lastScanStarted !== undefined ? { lastScanStarted: this.lastScanStarted } : {}),
@@ -106,6 +112,7 @@ export class Dispatcher {
     let announce = false;
     await this.serial.run(async () => {
       this.signal.throwIfAborted();
+      requireTracked(task);
       announce = Boolean(patch.sessionReady && !task.sessionReady) || Boolean(patch.status && patch.status !== task.status && ["done", "blocked", "failed", "waiting"].includes(patch.status));
       announce ||= patch.pr?.state === "closed" && task.pr?.state !== "closed";
       if (patch.sessionID) task.sessionIDs = [...new Set([...task.sessionIDs ?? [], ...[task.previousSessionID, task.sessionID, patch.sessionID].filter((id): id is string => Boolean(id))])];
@@ -127,13 +134,16 @@ export class Dispatcher {
     for (const repo of this.options.repositories) {
       // Watch PR state independently of automatic merging, issue state, and
       // worker progress so manual closure/merge also reaches attached TUIs.
-      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && t.pr && !t.merged)) {
-        const pr = await this.github.pull(repo.repo, task.pr!.number);
-        const merged = pr.merged === true || Boolean(pr.merged_at);
-        if (pr.state !== task.pr!.state || merged) await this.update(task, { pr, ...(merged ? { merged: true } : {}) });
+      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && !closing(t) && t.pr && !t.merged)) {
+        if (closing(task)) continue;
+        try {
+          const pr = await this.github.pull(repo.repo, task.pr!.number);
+          const merged = pr.merged === true || Boolean(pr.merged_at);
+          if (pr.state !== task.pr!.state || merged) await this.update(task, { pr, ...(merged ? { merged: true } : {}) });
+        } catch (error) { if (!closing(task)) throw error; }
       }
       const issues = await this.github.issues(repo.repo);
-      for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo)) {
+      for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo && !closing(t))) {
         if (!issues.some(i => i.number === tracked.issue.number)) issues.push(await this.github.issue(repo.repo, tracked.issue.number));
       }
       for (const issue of issues) {
@@ -141,6 +151,7 @@ export class Dispatcher {
         if (issue.pull_request) { ignored++; continue; }
         const key = `${repo.repo.toLowerCase()}#${issue.number}`;
         const existing = this.queue.tasks.find(t => t.key === key);
+        if (existing && closing(existing)) { ignored++; continue; }
         if (!existing && issue.state !== "open") { ignored++; continue; }
         const comments = await this.github.comments(repo.repo, issue.number);
         // A person may share the posting account with the bot. Exclude marked
@@ -150,6 +161,7 @@ export class Dispatcher {
         if (existing) {
           // For queues from older versions, comments after the bot's acknowledgement are new feedback.
           await this.serial.run(async () => {
+            if (closing(existing)) return;
             const previousCursor = existing.commentCursor ?? existing.commentID ?? 0;
             const fresh = authorized.filter(c => c.id > previousCursor);
             let remaining = fresh;
@@ -196,10 +208,12 @@ export class Dispatcher {
   }
   private authorized(login: string, authors: string[]) { return authors.some(a => a.toLowerCase() === login.toLowerCase()); }
   tick(): Promise<void> {
+    for (const task of this.queue.tasks.filter(t => t.status === "closing" && t.nextAt <= this.now())) this.startClosing(task);
     if (this.maintenance) return Promise.resolve();
     if (this.working) return this.working;
+    if (this.queue.tasks.some(t => t.status === "closing")) return Promise.resolve();
     this.workerState = "reconciling";
-    this.working = this.workOnce().finally(() => { this.working = undefined; this.workerState = "idle"; this.activeTask = undefined; });
+    this.working = this.workOnce().catch(error => { if (!(error instanceof TaskClosed)) throw error; }).finally(() => { this.working = undefined; this.workerState = "idle"; this.activeTask = undefined; });
     return this.working;
   }
   private async workOnce() {
@@ -267,6 +281,7 @@ export class Dispatcher {
         await this.resolveAnalysis(task, repo);
       }
       if (task.phase === "commented") {
+        requireTracked(task);
         // Saved pre-upgrade analyses had no decision. Reassess them before any
         // implementation, preserving an already-pending base question first.
         if (task.question?.purpose === "base") await this.resolveBase(task, repo);
@@ -275,19 +290,24 @@ export class Dispatcher {
         if (!task.commentID) throw new Blocked("Missing confirmed analysis comment");
         if (!task.baseBranch) await this.resolveBase(task, repo);
         repo = { ...repo, baseBranch: task.baseBranch! };
+        requireTracked(task);
         const workspace = await this.executor.prepare(task, repo);
         await this.update(task, { ...workspace, phase: "running", attempts: 0 });
       }
       if (task.phase === "running") {
+        requireTracked(task);
         await this.executor.run(task, patch => this.update(task, patch));
         if (task.question && !task.question.delivered) throw new WaitingForAnswer("Waiting for a reply in the GitHub issue");
         await this.update(task, { phase: "verifying", attempts: 0, sessionStopped: undefined, recovery: undefined });
       }
       if (task.phase === "verifying") {
+        requireTracked(task);
         const result = await this.executor.verify(task, repo);
         await this.update(task, { ...result, phase: "publishing", attempts: 0 });
       }
       if (task.phase === "publishing") {
+        requireTracked(task);
+        this.publishing.add(task.key);
         let pr = await this.github.findPull(task.repo, task.branch);
         if (followup && (!pr || pr.state !== "open")) throw new Blocked("The original PR is no longer open; changes remain in the worktree");
         if (followup && pr) await this.executor.push(task, repo);
@@ -300,12 +320,12 @@ export class Dispatcher {
         await this.update(task, { pr, publishedAt: this.now(), phase: "pr_opened", status: "done", attempts: 0 });
       }
     } catch (error) {
-      if (this.signal.aborted) return;
+      if (this.signal.aborted || closing(task) || error instanceof TaskClosed) return;
       if (error instanceof WaitingForAnswer) { await this.update(task, { status: task.question?.answer ? "ready" : "waiting", error: undefined }); return; }
       const attempts = task.attempts + 1;
       const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
       await this.update(task, { attempts, sessionStopped: error instanceof SessionStopped, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
-    }
+    } finally { this.publishing.delete(task.key); }
   }
   private async resolveAnalysis(task: Task, repo: Repository) {
     await this.update(task, { phase: "analyzing" });
@@ -333,6 +353,7 @@ export class Dispatcher {
     }
     const lastAnswer = task.analysisDialogue?.at(-1)?.answer.id;
     const marker = `<!-- opencode2:${task.key}:analysis:v${task.round ?? 1}${lastAnswer === undefined ? "" : `:reply:${lastAnswer}`} -->`;
+    requireTracked(task);
     const commentID = await this.github.ensureComment(task.repo, task.issue.number, marker, decision.comment);
     await this.update(task, { commentID, phase: "commented", attempts: 0, ...(task.question?.purpose === "analysis" ? { question: undefined } : {}) });
   }
@@ -370,7 +391,8 @@ export class Dispatcher {
       if (!task.publishedAt) { await this.update(task, { publishedAt: this.now() }); continue; }
       try {
         await this.scan(); // Pick up issue feedback before considering a completed task for merge.
-        if (task.pendingFeedback?.length || task.pr.state === "closed") continue;
+        if (closing(task) || task.pendingFeedback?.length || task.pr.state === "closed") continue;
+        this.publishing.add(task.key);
         const merged = await this.github.mergeApproved(task.repo, task.pr.number, task.commit, task.publishedAt, repo.allowedAuthors, this.options.autoMerge);
         if (merged) {
           await this.github.ensureComment(task.repo, task.pr.number, `<!-- opencode2:${task.key}:merged -->`, "Pull request merged.");
@@ -380,11 +402,12 @@ export class Dispatcher {
         if (this.signal.aborted) return;
         await this.update(task, { mergeError: redact(error, this.secrets), mergeNextAt: Math.max(this.now() + 60_000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
       }
+      finally { this.publishing.delete(task.key); }
     }
   }
   runtime(sessionID: string) {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID || t.helpers?.some(h => h.id === sessionID && h.parentID === t.sessionID));
-    if (!task) return null;
+    if (!task || closing(task)) return null;
     const result = JSON.parse(JSON.stringify(task)) as Task;
     const matching = Object.values(this.options.routes).filter(r => r.agent === task.route?.agent && r.model.id === task.route?.model.id && r.model.providerID === task.route?.model.providerID);
     const configured = matching.length === 1 ? matching[0] : undefined;
@@ -399,6 +422,7 @@ export class Dispatcher {
   private async askTask(task: Task, input: z.infer<typeof PendingQuestion>) {
     let question!: z.infer<typeof PendingQuestion>;
     await this.serial.run(async () => {
+      requireTracked(task);
       if (!task.question || task.question.delivered) task.question = input;
       question = task.question; await this.store.save(this.queue);
     });
@@ -406,6 +430,7 @@ export class Dispatcher {
     return { id: question.id };
   }
   private async publishQuestion(task: Task, question: z.infer<typeof PendingQuestion>) {
+    requireTracked(task);
     if (!question.commentID) {
       const body = `Question (${question.id})\n\n${question.text}\n\n${question.permission ? `Reply with /allow ${question.id} or /deny ${question.id}.` : "Reply in this issue to continue. Only configured authors can answer."}`;
       const marker = `<!-- opencode2:${task.key}:question:${question.id} -->`;
@@ -422,9 +447,10 @@ export class Dispatcher {
   }
   async helper(sessionID: string, callID: string, capability: "vision" | "audio") {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID);
-    if (!task || task.phase !== "running" || task.question && !task.question.delivered) throw new Error("No active main bot session available for delegation");
+    if (!task || closing(task) || task.phase !== "running" || task.question && !task.question.delivered) throw new Error("No active main bot session available for delegation");
     const id = `ses_${createHash("sha256").update(`${sessionID}:${callID}`).digest("hex").slice(0, 32)}`;
     await this.serial.run(async () => {
+      requireTracked(task);
       if (!task.helpers?.some(h => h.id === id)) task.helpers = [...task.helpers ?? [], { id, parentID: sessionID, capability }];
       await this.store.save(this.queue);
     });
@@ -441,6 +467,7 @@ export class Dispatcher {
       this.signal.throwIfAborted();
       const task = this.queue.tasks.find(t => t.key === key);
       if (!task) throw new Error("Task not found in this project");
+      if (closing(task)) throw new Error("Task tracking is closed; inspect its saved session or create a new issue");
       if (task.question && !task.question.delivered) throw new Error("Answer the pending question or permission request in the GitHub issue first");
       if (task.merged || task.pr?.state === "closed") throw new Error("The original PR is closed or merged; reopen it or create a new issue");
       if (!["blocked", "failed"].includes(task.status)) return false;
@@ -468,5 +495,49 @@ export class Dispatcher {
     await this.update(task, { status: "ready", attempts: 0, nextAt: this.now(), error: undefined });
     return true;
   }
-  async settle() { await Promise.allSettled([this.scanning, this.working, this.maintenance]); }
+  async closeTask(key: string) {
+    const task = await this.serial.run(async () => {
+      this.signal.throwIfAborted();
+      const task = this.queue.tasks.find(t => t.key === key);
+      if (!task) throw new Error("Task not found in this project");
+      if (task.status === "closed") return undefined;
+      if (this.publishing.has(key)) throw new Error("Publication or merge is already in flight. Wait for it to finish, then close the task.");
+      Object.assign(task, { status: "closing", closeRequestedAt: task.closeRequestedAt ?? this.now(), closeError: undefined, nextAt: this.now() });
+      await this.store.save(this.queue);
+      return task;
+    });
+    if (!task) return false;
+    await this.notify(activityOf(task)).catch(() => {});
+    this.startClosing(task);
+    return true;
+  }
+  private startClosing(task: Task) {
+    if (this.closures.has(task.key) || this.signal.aborted) return;
+    const work = this.activeTask === task.key ? this.working : undefined;
+    const operation = (async () => {
+      try {
+        // The durable status is saved before interruption. A replacement owner
+        // resumes this operation and never retries implementation/publication.
+        await this.executor.cancel(task, true);
+        await work;
+        await Promise.allSettled([...this.questionPosts].filter(([key]) => key.startsWith(`<!-- opencode2:${task.key}:`)).map(([, post]) => post));
+        // Session creation may have been in flight before the first interrupt.
+        await this.executor.cancel(task, true);
+        await this.serial.run(async () => {
+          this.signal.throwIfAborted();
+          Object.assign(task, { status: "closed", closedAt: this.now(), closeError: undefined });
+          await this.store.save(this.queue);
+        });
+      } catch (error) {
+        if (this.signal.aborted) return;
+        await this.serial.run(async () => {
+          Object.assign(task, { status: "closing", closedAt: undefined, closeError: redact(error, this.secrets), nextAt: this.now() + 30_000 });
+          await this.store.save(this.queue);
+        });
+      }
+      await this.notify(activityOf(task)).catch(() => {});
+    })().catch(error => console.error("Task closure failed", redact(error, this.secrets))).finally(() => this.closures.delete(task.key));
+    this.closures.set(task.key, operation);
+  }
+  async settle() { await Promise.allSettled([this.scanning, this.working, this.maintenance, ...this.closures.values()]); }
 }

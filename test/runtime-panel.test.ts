@@ -57,3 +57,14 @@ test("refresh coalesces concurrent calls and disposal cancels ignored SDK waits 
   resolve(snapshot.dispatcher); await new Promise(r => setImmediate(r));
   assert.equal(changes, 1); assert.deepEqual(poller.get(), {});
 });
+
+test("sidebar names attention tasks and excludes locally closed tasks from live counts", () => {
+  const state = structuredClone(snapshot);
+  state.dispatcher!.tasks[0] = { ...state.dispatcher!.tasks[0]!, status: "closed" };
+  state.dispatcher!.tasks[1] = { ...state.dispatcher!.tasks[1]!, status: "blocked", error: "Session stopped" };
+  delete state.dispatcher!.activeTask;
+  assert.match(text(state), /owner\/repo#3: blocked · Session stopped/);
+  assert.match(text(state), /Queue: 0 scheduled · 0 waiting/);
+  assert.match(text(state), /1 blocked\/failed/);
+  assert.equal(selectedTask(state)?.key, "owner/repo#3");
+});

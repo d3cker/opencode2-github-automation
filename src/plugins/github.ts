@@ -55,6 +55,7 @@ export default Plugin.define({
         activity: async () => dispatcher.activity(),
         monitor: async () => dispatcher.monitor(),
         retry: async ({ key, restartSession }) => { controller.signal.throwIfAborted(); return { accepted: await dispatcher.retry(key, restartSession) }; },
+        close: async ({ key }) => ({ accepted: await dispatcher.closeTask(key) }),
         restartworkflow: async ({ key }) => ({ accepted: await dispatcher.restartWorkflow(key) }),
       });
       registration = rpc;

@@ -813,3 +813,76 @@ test("monitor identifies the actual executing task and returns to idle after pub
   assert.equal(d.monitor().worker, "idle"); assert.equal(d.monitor().activeTask, undefined);
   assert.equal(d.monitor().tasks[0]!.status, "done");
 });
+
+test("closing a stale task preserves work and stops discovery even when issue and PR are gone", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const before = d.status()[0]!;
+  await d.closeTask(before.key); await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  for (const field of ["worktree", "branch", "sessionID", "commit", "phase"] as const) assert.equal(d.status()[0]![field], before[field]);
+  f.github.issues = async () => [issue];
+  f.github.issue = f.github.pull = async () => { throw new Error("Deleted from GitHub"); };
+  f.github.comments = async () => { throw new Error("Must not fetch comments for closed task"); };
+  const next = f.make(); await next.init(); await next.scan(); await next.tick();
+  assert.equal(next.status().length, 1); assert.equal(next.status()[0]!.status, "closed");
+  assert.equal(next.runtime(before.sessionID!), null);
+  await assert.rejects(next.restartWorkflow(before.key), /tracking is closed/);
+  assert.equal(await next.closeTask(before.key), false);
+  assert.equal(await next.retry(before.key, true), false);
+});
+
+test("close interrupts an active session and a late checkpoint cannot verify or publish", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_active" }); entered(); await pending; await checkpoint({ sessionReady: true }); };
+  f.executor.cancel = async (_task, related) => { assert.equal(related, true); finish(); };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await d.closeTask("owner/repo#1"); await work; await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  assert.equal(d.status()[0]!.sessionID, "ses_active");
+  assert.ok(!f.events.includes("verify")); assert.ok(!f.events.includes("push"));
+});
+
+test("closure failures stay visible and restart retries without resuming implementation", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.cancel = async () => { throw new Error("Interrupt connection failed"); };
+  await d.closeTask("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "closing"); assert.match(d.activity()[0]!.error!, /Interrupt connection/);
+  f.executor.cancel = async () => {};
+  f.advance(); const next = f.make(); await next.init(); await next.tick(); await next.settle();
+  assert.equal(next.status()[0]!.status, "closed"); assert.deepEqual(f.events, []);
+});
+
+test("closing a waiting task retains question and feedback but accepts no later runtime actions", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_test" }); await d.question("ses_test", "q1", "Need permission"); throw new Error("Stopped"); };
+  await d.tick(); const previous = d.status()[0]!;
+  await d.closeTask(previous.key); await d.settle();
+  assert.deepEqual(d.status()[0]!.question, previous.question);
+  await assert.rejects(d.question("ses_test", "q2", "Again"), /No active/);
+  await assert.rejects(d.helper("ses_test", "h1", "vision"), /No active/);
+});
+
+test("closure refuses an in-flight publication without claiming to undo a remote push", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.push = async () => { entered(); await pending; };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await assert.rejects(d.closeTask("owner/repo#1"), /already in flight/);
+  assert.equal(d.status()[0]!.status, "ready");
+  finish(); await work;
+  await d.closeTask("owner/repo#1"); await d.settle(); assert.equal(d.status()[0]!.status, "closed");
+});
+
+test("closure during verification waits for local work and prevents the following push", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.verify = async () => { entered(); await pending; return { checks: ["passed"], commit: "saved-locally" }; };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await d.closeTask("owner/repo#1");
+  assert.equal(d.status()[0]!.status, "closing");
+  assert.equal(d.monitor().worker, "maintenance");
+  finish(); await work; await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  assert.equal(f.events.includes("push"), false); assert.equal(f.events.includes("pr"), false);
+});

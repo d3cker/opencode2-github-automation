@@ -9,7 +9,7 @@ published package through the release process.
 
 Read the diagrams together: sections 1–3 cover scheduling and admission, section 4
 covers the saved main session, sections 5–7 cover helpers and publication, and
-section 8 covers every recovery entry point. Model planning, subagents and review
+section 8 covers recovery and local task closure. Model planning, subagents and review
 happen inside `running`; they are not additional persisted phases.
 
 ## 1. Startup, ownership, and polling
@@ -32,7 +32,10 @@ flowchart TD
     Scan --> Save[Persist result, failures and nextAt]
     Save --> Clock
     Due -->|No| Clock
-    Worker --> Recover[Probe eligible stopped sessions and recover unpublished questions]
+    Worker --> Closing[Resume due closing requests independently of active worker]
+    Closing --> Clear{Any closure still pending?}
+    Clear -->|Yes| Worker
+    Clear -->|No| Recover[Probe eligible stopped sessions and recover unpublished questions]
     Recover --> Round[Promote one done task with pending feedback to a new round]
     Round --> Select[Choose ready or retry_wait task, saved running session first]
     Select --> Candidate{Candidate exists?}
@@ -91,9 +94,9 @@ Sources: [index.ts](../src/index.ts), [easy.ts](../src/easy.ts),
 
 ```mermaid
 flowchart TD
-    Scan[Scan each configured repository] --> PRs[Refresh tracked PRs not already marked merged]
-    PRs --> Issues[List open issues and fetch missing tracked issues]
-    Issues --> Skip{PR entry or closed untracked issue?}
+    Scan[Scan each configured repository] --> PRs[Refresh tracked PRs excluding merged and locally closing or closed tasks]
+    PRs --> Issues[List open issues and fetch missing actively tracked issues]
+    Issues --> Skip{PR entry, locally closing or closed task, or closed untracked issue?}
     Skip -->|Yes| Ignore[Ignore entry]
     Skip -->|No| Comments[Read comments and filter authorized human comments without bot markers]
     Comments --> Tracked{Task already exists?}
@@ -181,6 +184,10 @@ flowchart TD
     PB -->|Eligible retry| P
     Done -->|Pending authorized feedback| Round[Increment round, move feedback and reset per-round state]
     Round --> Q
+    Operator[Operator confirms Stop and close task] --> Closing[Persist closing at any saved phase]
+    Closing --> Drain[Interrupt known sessions and drain current operation]
+    Drain --> Closed[Persist closed and retain work and history]
+    Closing -.-> Guards[Reject new checkpoints, runtime hooks and publication]
 ```
 
 Before `queued`, `analyzing`, or `commented` work advances, the dispatcher checks
@@ -269,7 +276,13 @@ sequenceDiagram
         D->>S: Resume same session with deterministic answer message ID
         D->>S: Wait for completion
     end
-    alt Owner is disposed
+    alt Operator closes task
+        U->>D: Confirm Stop and close task in bot menu
+        D->>D: Persist closing and reject new checkpoints and prompts
+        D->>S: Interrupt known task sessions and wait for idleness
+        D->>D: Drain in-flight worker and persist closed
+        Note over D,G: Preserve work and history, no GitHub closure request
+    else Owner is disposed
         Note over D,S: Release local wait without interrupting healthy execution
         Note over D: Replacement owner loads queue and rejoins saved session
     else Session deadline expires
@@ -363,10 +376,11 @@ flowchart TD
     Wait -->|Completed| Result{Succeeded outcome and non-error final assistant with finish stop?}
     Result -->|No| Error
     Result -->|Yes| Return[Return findings to main session, keep main model unchanged]
+    Closing[Local tracking closing or closed] --> Deny[Reject helper registration and runtime lookup]
 ```
 
 Only the owning main bot session can delegate media; the helper-registration
-step also requires `running` with no unresolved question. Helpers have no tools.
+step also requires `running`, active tracking and no unresolved question. Helpers have no tools.
 URLs cannot contain credentials; local paths are resolved and must remain inside
 the worktree. GitHub credentials are not forwarded to media URLs. A helper uses
 stable session and prompt IDs for a given call. Helper failures return errors;
@@ -409,6 +423,9 @@ flowchart TD
     Create --> Done
     Push --> Done
     Failure[Other command, model or transport error] --> Policy[Keep current phase and apply retry policy in section 8]
+    Close[Operator closes task before publishing starts] --> Drain[Finish in-flight local operation, reject next checkpoint]
+    Drain --> Preserve[Do not publish, preserve existing local changes]
+    InFlight[Publication already in flight] --> Refuse[Reject close request and ask operator to retry after completion]
 ```
 
 Resuming `running` validates the saved session first; retrying `verifying` runs
@@ -472,6 +489,9 @@ flowchart TD
     Manual[Manual PR close or merge] --> Refresh[Repository scan refreshes tracked PR state]
     Ack --> UI[Activity events and TUI polling every 10 seconds]
     Refresh --> UI
+    Local[Task closure finishes with status closed] --> UI
+    Menu[bot menu: select issue] --> Action[Open session, details, close tabs, restart workflow, stop and close task]
+    Action -->|Stop and close task| Confirm[Confirm stop and close, queue durable closing request]
     UI --> Busy{Associated tab busy?}
     Busy -->|Yes| Defer[Retry closure on a later snapshot]
     Busy -->|No| Tabs[Close known task and helper tabs once, preserve sessions and worktrees]
@@ -520,10 +540,11 @@ Feedback after closure can still be queued, but the next round's guards block it
 
 PR-state scanning is independent of auto-merge and issue openness. The TUI
 subscribes to activity and polls every 10 seconds, including recovery on startup.
-It opens background task tabs when enabled and exposes `/bot` for session access
+It opens background task tabs when enabled and exposes `/bot` for task management
 and `/restartworkflow` for operator recovery in the owner project. Commands use
 owner-scoped RPC; they are not GitHub comment commands. Activity phases `merged`
 and `pr_closed` are display values, not new persisted execution phases.
+Local task statuses `closing` and `closed` are durable and separate from PR state.
 Closure cleanup includes known earlier-round sessions and media helpers. Busy
 tabs wait until idle; cleanup does not delete sessions, interrupt work, or remove
 worktrees. A manually reopened tab is not repeatedly closed in the same TUI instance.
@@ -555,6 +576,8 @@ An error normally preserves the phase so retry continues from its checkpoint.
 | `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
 | `failed` | Other errors reached `maxAttempts`; operator recovery/retry required unless the checkpoint also qualifies as a stopped-session recovery candidate. |
 | `done` | PR publication/reconciliation completed; feedback and merge monitoring remain possible. |
+| `closing` | Operator requested end of tracking; interrupt sessions and drain in-flight work, retaining errors for retry. |
+| `closed` | Tracking ended locally; preserve history and work, exclude discovery, runtime hooks, execution and merge monitoring. |
 
 ```mermaid
 flowchart TD
@@ -572,7 +595,7 @@ flowchart TD
     Rejoin --> Work
     Complete -->|No or probe fails| Retain[Retain block and feedback, probe no sooner than 30 seconds later]
     Retain --> Probe
-    Command[Operator uses restartworkflow] --> Guards{Known task, no unresolved question and no closed or merged PR?}
+    Command[Operator uses restartworkflow] --> Guards{Known actively tracked task, no unresolved question and no closed or merged PR?}
     Guards -->|No| Reject[Return actionable error, preserve checkpoint]
     Guards -->|Yes| Eligible{Status blocked or failed?}
     Eligible -->|No| Noop[accepted false, do not duplicate scheduled or completed work]
@@ -589,6 +612,17 @@ flowchart TD
     Cancel --> Earlier[Return to commented if commentID exists, otherwise queued]
     Earlier --> Reset
     Reset --> Work
+    Close[bot menu: Stop and close task] --> Flight{Publication or merge already in flight?}
+    Flight -->|Yes| RejectClose[Reject closure, wait and try again]
+    Flight -->|No| SaveClose[Persist closing before interruption]
+    SaveClose --> Interrupt[Interrupt known sessions, missing sessions count as stopped]
+    Interrupt --> Drain[Wait for current worker and pending question posts]
+    Drain --> Again[Interrupt again to cover in-flight session creation]
+    Again --> Closed[Persist closed, preserve history and all local work]
+    Interrupt -->|Failure| CloseError[Retain closing with error, retry after 30 seconds]
+    Again -->|Failure| CloseError
+    CloseError --> Interrupt
+    Restart[Owner restart with saved closing request] --> Interrupt
 ```
 
 - Task backoff is `min(3600, 5 * 2^attempts)` seconds, with the incremented
@@ -640,6 +674,8 @@ service, resume a paused scheduler, or perform a scan itself.
 | Action | Saved phase and session | Effect |
 | --- | --- | --- |
 | Continue a stopped session in the TUI | Same session, `running` phase | Once successful and recognized by the probe, normal session validation, checks and publication resume automatically. |
+| `/bot`, select an issue, then Stop and close task | Keep phase, sessions, worktree, branch and PR | Persist closing, interrupt saved sessions and drain work, then close local tracking. No GitHub issue/PR close or deletion. |
+| `/bot`, select an issue, then Close session tabs | No checkpoint change | Close idle local tabs only, continue tracking. |
 | `/restartworkflow`, then select an issue | Same phase, session, worktree, branch and PR | Queue recovery for an eligible blocked/failed task. A stopped session may receive one continuation; verification/publication retries its saved stage. |
 | `opencode2-automation restartworkflow 'owner/repository#123'` | Same as the TUI command | Calls `automation.github.restartworkflow` with `{ key }`, returning `{ accepted }`. |
 | `opencode2-automation retry 'owner/repository#123'` | Same saved phase and session | Clear blocked/failed status while worker and maintenance are idle; it does not send a continuation merely because a session was stopped. |
@@ -657,3 +693,29 @@ separate durable checkpoints. A failed test is never treated as session success.
 Regression evidence: [core.test.ts](../test/core.test.ts),
 [executor.test.ts](../test/executor.test.ts), [runtime.test.ts](../test/runtime.test.ts),
 [lifecycle.test.ts](../test/lifecycle.test.ts), [ui.test.ts](../test/ui.test.ts).
+
+### Local closure and missing GitHub objects
+
+`/bot` also exposes the saved error and task identity before any operator action.
+Closing is independent of GitHub availability, issue state, PR state, route validity
+and pending questions. The durable `closed` record prevents the same issue key
+from being rediscovered. Scans skip closing/closed records before PR, missing-issue
+and comment reads; late checkpoints and errors cannot reactivate them. There is
+no automatic deletion based on an ambiguous GitHub 404 response.
+
+Closing preserves pending feedback and questions as history, but does not process
+them. The main runtime and media helper registration reject further task activity.
+The task's in-flight worker operation may finish local work before closure completes;
+no subsequent verification/publication phase starts. Already-started publication
+or merge refuses closure admission. In-flight comments cannot be recalled. Errors
+while stopping sessions remain visible as `closing`, retried after 30 seconds or
+from the menu. `accepted` acknowledges the request, not finished interruption.
+
+The sidebar names up to three blocked/failed/closing tasks with their saved errors,
+excludes locally closed tasks from live queue counts, and shows a separate closing
+count. `/bot` retains all task records and their actions, including opening the
+saved conversation after closure. See [runtime management](runtime.md#manage-tasks-from-bot).
+
+While a closure is pending, the dispatcher does not start another worker pass.
+An unrelated already-running task can finish; scanning continues for other tasks.
+The monitor reports task maintenance until closure completes.
