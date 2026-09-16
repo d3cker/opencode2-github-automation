@@ -9,6 +9,9 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   const recovered: string[] = [], alerts: unknown[] = [], ended: string[] = [];
   const choices: (string | undefined)[] = [];
   let recoveryError: Error | undefined;
+  let repositoriesError = false;
+  const repositoryRequests: unknown[] = [];
+  const repositoryReport = { entries: [{ ownerDirectory: "/remote/owner", directory: "/remote/project", stateDirectory: "/remote/state", repo: "remote/repo", baseBranch: "devel", registeredAt: 0, status: "not-running" }], warnings: [] };
   const commands = new Map<string, () => Promise<void>>();
   const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [], closed: string[] = [];
   const tabs = new Map(restored.map(sessionID => [sessionID, { sessionID, busy: false }]));
@@ -17,7 +20,7 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
     location: { directory: "/repo" },
-    client: { rpc: () => ({ activity: async () => initial, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
+    client: { rpc: () => ({ repositories: async (_input: unknown, request: unknown) => { repositoryRequests.push(request); if (repositoriesError) throw new Error("Unavailable"); return repositoryReport; }, activity: async () => initial, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
     data: { session: { sync: async () => {} } },
     keymap: { layer: (get: () => { commands: { slash: { name: string }; run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; for (const cmd of get().commands) commands.set(cmd.slash.name, cmd.run); } },
     ui: {
@@ -33,7 +36,7 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { repositoryRequests, repositoriesError: () => { repositoriesError = true; }, ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -149,5 +152,19 @@ test("/bot can close tracking before a session exists and tab-only closure never
     f.event(activity); f.tabs.get("ses_test")!.busy = true;
     f.choose(activity.key, "tabs"); await f.command(); assert.equal(f.closed.length, 0); assert.equal(f.ended.length, 1);
     assert.match(JSON.stringify(f.toasts.at(-1)), /Busy tabs/);
+  } finally { f.stop(); }
+});
+
+
+test("/bot lists remote repositories even with no tasks and never starts or restarts a task", async () => {
+  const f = fixture();
+  try {
+    f.choose("repositories", "0"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /remote\/repo/);
+    assert.match(JSON.stringify(f.alerts.at(-1)), /remote\/project/);
+    assert.equal((f.repositoryRequests[0] as { location: { directory: string } }).location.directory, "/repo");
+    assert.deepEqual(f.recovered, []); assert.deepEqual(f.ended, []); assert.deepEqual(f.navigated, []);
+    f.repositoriesError(); f.choose("repositories"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /Repositories unavailable/);
   } finally { f.stop(); }
 });

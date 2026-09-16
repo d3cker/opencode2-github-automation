@@ -249,6 +249,12 @@ installations are not removed by `npm uninstall --global`.
 - **Merging:** approve the bot's PR or post a configured merge phrase. The author
   must be allowed and have repository write access. Set `autoMerge.enabled` to
   `false` to disable this. `signature` controls the signature on new bot messages.
+- **Repository inventory:** run `opencode2-automation list` from any directory,
+  or choose **Repositories** in `/bot`. See registered GitHub repositories, owner
+  and checkout paths, base branches, timestamped runtime status, scan timing and
+  issue counts/errors. Use `list --json` for scripts and
+  `list --discover /absolute/path/to/projects` to import older standard configs
+  without starting bots. See [repository inventory](docs/runtime.md#repository-inventory).
 - **Runtime status:** the right sidebar's **BOT RUNTIME** panel shows dispatcher
   work, GitHub discovery, scheduled scans, queue counts and the selected task.
   `/botstatus` opens a full text report. Status refreshes every five seconds;

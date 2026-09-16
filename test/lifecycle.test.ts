@@ -26,6 +26,8 @@ test("cleanup settles work and releases ownership even after disposal failures",
 for (const kind of ["github", "scheduler"] as const) {
   test(`${kind} plugin releases its actual lock when RPC disposal rejects`, async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "oc2-lifecycle-")));
+    const oldState = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = directory;
     const tokenName = "OC2_LIFECYCLE_TEST_TOKEN";
     process.env[tokenName] = "test-token";
     const rpc = Object.assign(() => ({ scan: async () => ({}) }), {
@@ -46,6 +48,7 @@ for (const kind of ["github", "scheduler"] as const) {
       await release();
       assert.equal(runtimeBridge(directory), undefined);
     } finally {
+      if (oldState === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = oldState;
       delete process.env[tokenName];
       await rm(directory, { recursive: true, force: true });
     }

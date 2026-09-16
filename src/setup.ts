@@ -10,10 +10,21 @@ import { Service } from "@opencode/client/service";
 import { configure } from "./wizard.js";
 import { installLocalEntrypoints } from "./local.js";
 import { installGlobalEntrypoints } from "./install.js";
+import { discoverRepositories, listRepositories, registerRepositories } from "./repositories.js";
+import { formatRepositories } from "./repository-report.js";
 import { fileURLToPath } from "node:url";
 
 async function main() {
   const operation = process.argv[2];
+  if (operation === "list") {
+    const { values, positionals } = parseArgs({ args: process.argv.slice(3), options: { json: { type: "boolean" }, discover: { type: "string" } } });
+    if (positionals.length) throw new Error("Usage: opencode2-automation list [--json] [--discover /path/to/projects]");
+    const discovered = values.discover ? await discoverRepositories(values.discover) : undefined;
+    const report = await listRepositories();
+    report.warnings.push(...discovered?.warnings ?? []);
+    console.log(values.json ? JSON.stringify(report, null, 2) : formatRepositories(report));
+    return;
+  }
   if (operation === "install") {
     const directory = await installGlobalEntrypoints(fileURLToPath(new URL("..", import.meta.url)));
     console.log(`Registered OpenCode 2 automation and TUI in ${directory}. Restart the service when its sessions are idle. Run init inside a project when ready.`);
@@ -42,7 +53,7 @@ async function main() {
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation retry owner/repo#123 [--restart-session]\n       opencode2-automation restartworkflow owner/repo#123\ninstall registers the global plugin. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation list [--json] [--discover /path/to/projects]\n       opencode2-automation retry owner/repo#123 [--restart-session]\n       opencode2-automation restartworkflow owner/repo#123\ninstall registers the global plugin. list works from any directory. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());
@@ -102,6 +113,7 @@ async function main() {
       await installLocalEntrypoints(root);
     }
   } catch (error) { await rm(file); throw error; }
+  await registerRepositories(resolved.github.repositories.map(r => ({ ownerDirectory: root, directory: r.directory, repo: r.repo, baseBranch: r.baseBranch, stateDirectory: resolved.github.stateDirectory, configFile: file, registeredAt: Date.now() }))).catch(error => console.error(`Repository registration failed; retry with list --discover "${root}": ${error instanceof Error ? error.message : "unknown error"}`));
   console.log(`Ready: ${resolved.repo}. Trigger: ${EasyOptions.parse(settings).trigger}. Account: ${resolved.login}. Tests: ${resolved.check === false ? "skipped — the PR will report this" : resolved.check.join(" ")}.\nLoad the project in OpenCode 2 through the TUI or the API. Automation also considers existing matching issues.`);
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : "Configuration failed"); process.exitCode = 1; });

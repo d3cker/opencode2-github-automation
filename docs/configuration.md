@@ -167,3 +167,14 @@ acknowledgements. They identify the message in its text; GitHub still attributes
 posts to the account authenticated by your token. Existing posts are not rewritten.
 Set `"autoMerge": { "enabled": false }` to disable automatic merging.
 
+
+## Repository inventory registration
+
+`init` and owner activation register the configured checkout for
+`opencode2-automation list` and `/bot` → **Repositories**. No new project setting
+is required. The registry stores last-resolved repository/base-branch metadata
+and timestamped component snapshots under the user's state directory; it does
+not replace `.opencode/automation.json` or the shared Git queue. Changes to default
+branches are reflected when the owner is activated again. See
+[repository inventory](runtime.md#repository-inventory) to import older inactive
+configurations and distinguish configured projects from running bots.

@@ -24,6 +24,13 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Added
 
+- List configured repositories across the host with `opencode2-automation list`
+  (`--json` for scripts) and `/bot` → **Repositories**. Show owner/checkout paths,
+  base branches, timestamped dispatcher/scheduler status and concrete issue
+  failures without activating other bots. Register projects during init/startup;
+  import older inactive standard configurations with `list --discover <root>`.
+  Preserve missing entries and explicitly mark stopped, stale or unavailable data.
+
 - Manage tasks directly from `/bot`: inspect details, open sessions, close idle
   tabs, restart workflows, or stop sessions and durably end tracking without
   deleting work. Preserve closed tasks as history and skip rediscovery, feedback,

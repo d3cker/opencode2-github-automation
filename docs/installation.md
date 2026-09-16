@@ -123,5 +123,13 @@ commands and action menus such as `/bot` task closure and `/restartworkflow`; me
 reload its client's command registrations. A service restart preserves queue
 blocks and pending questions. Use [workflow recovery](runtime.md#interrupted-sessions-and-workflow-recovery)
 for an execution stop instead of reinstalling or deleting state.
+After upgrading, activated owners register themselves for
+`opencode2-automation list`. Import older, currently inactive standard projects
+with `opencode2-automation list --discover /absolute/path/to/projects`; this does
+not activate them. Use the same user and `XDG_STATE_HOME` as the service. The TUI's
+**Repositories** option reads the connected server registry. See
+[repository inventory](runtime.md#repository-inventory) for discovery limits,
+status freshness, and missing-directory behavior.
+
 Do not change an active project's `origin` to switch repositories: clone another
 project and configure it separately.

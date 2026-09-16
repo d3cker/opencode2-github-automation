@@ -20,8 +20,10 @@ flowchart TD
     Owner -->|No or outside Git| Inactive[Plugin stays inactive]
     Owner -->|Yes| Config[Use nonempty plugin options or read .opencode/automation.json]
     Config -->|No project config| Inactive
-    Config --> Resolve[Validate settings and resolve GitHub auth, routes and defaults]
-    Resolve --> GH[Acquire github lock and load queue.json]
+    Config --> Register[Register primary checkout in local user inventory without activating other owners]
+    Register --> Resolve[Validate settings and resolve GitHub auth, routes and defaults]
+    Resolve --> Metadata[Register resolved repositories and base branches]
+    Metadata --> GH[Acquire github lock and load queue.json]
     GH --> RPC[Register runtime bridge and dispatcher RPC]
     RPC --> Worker[Immediate worker tick, then every workerEverySeconds]
     RPC --> Scheduler[Start scheduler after GitHub setup succeeds]
@@ -50,7 +52,7 @@ flowchart TD
     Keepalive --> PID{Registered service PID matches this process?}
     PID -->|Yes| Touch[Create or reuse maintenance session, then emit rename event]
     PID -->|No| Skip[Skip keepalive]
-    Stop[Owner reload or shutdown] --> Cleanup[Stop timers and local waits, settle writes, dispose RPC, release locks]
+    Stop[Owner reload or shutdown] --> Cleanup[Stop timers, save stopped inventory snapshots, settle writes, dispose RPC, release locks]
     Cleanup --> Preserve[Preserve durable queue and healthy worktree execution]
     Preserve --> Load
     View[Runtime sidebar or botstatus] -.-> Monitor[Read dispatcher monitor and scheduler status every five seconds]
@@ -59,8 +61,25 @@ flowchart TD
     Monitor --> Fresh{Both readings available and fresh?}
     Fresh -->|Yes| Display[Show live operations, queue and selected task]
     Fresh -->|No| Stale[Mark unavailable or retained stale readings]
+    RPC -.-> DS[Publish dispatcher snapshot every five seconds]
+    State -.-> SS[Publish scheduler snapshot every five seconds]
+    DS --> Inventory[Per-user registry and separate atomic component snapshots]
+    SS --> Inventory
+    Register --> Inventory
+    Metadata --> Inventory
+    Init[CLI init or explicit list --discover] --> Inventory
+    List[CLI list or bot Repositories via current owner RPC] --> Read[Read local inventory without activating owners]
+    Inventory -.-> Read
+    Read --> Check[Check paths, config, PID and 15-second freshness]
+    Check --> Report[Report repository status, scan timing, task counts and issue errors]
 ```
 
+- Registration and component snapshots are observational, best-effort writes.
+  Registry errors do not stop the bot. `init` registers after configuration succeeds;
+  explicit discovery imports old standard configs without auth or service startup.
+  The CLI and TUI report share a per-user host registry, not the task queue.
+  Missing paths and stale/dead processes are shown explicitly. See
+  [inventory behavior and limits](runtime.md#repository-inventory).
 - Easy configuration puts state under the shared Git directory at
   `opencode2-automation/`. Worker worktrees do not start another scheduler.
 - Default discovery interval: **60 seconds**. Default worker interval:
@@ -88,7 +107,8 @@ flowchart TD
 Sources: [index.ts](../src/index.ts), [easy.ts](../src/easy.ts),
 [GitHub plugin](../src/plugins/github.ts),
 [scheduler plugin](../src/plugins/scheduler.ts), [lifecycle.ts](../src/lifecycle.ts),
-[dispatcher.ts — workOnce](../src/dispatcher.ts), [state.ts](../src/state.ts).
+[dispatcher.ts — workOnce](../src/dispatcher.ts), [state.ts](../src/state.ts),
+[repositories.ts](../src/repositories.ts), [repository-report.ts](../src/repository-report.ts).
 
 ## 2. Discovery and routing
 
@@ -490,7 +510,9 @@ flowchart TD
     Ack --> UI[Activity events and TUI polling every 10 seconds]
     Refresh --> UI
     Local[Task closure finishes with status closed] --> UI
-    Menu[bot menu: select issue] --> Action[Open session, details, close tabs, restart workflow, stop and close task]
+    Menu[bot menu: select issue or Repositories] --> Action[Open session, details, close tabs, restart workflow, stop and close task]
+    Menu -->|Repositories| Repos[Read connected server inventory, choose repository, show timestamped details]
+    Repos --> Observe[No task or scheduler mutation, no activation of other owners]
     Action -->|Stop and close task| Confirm[Confirm stop and close, queue durable closing request]
     UI --> Busy{Associated tab busy?}
     Busy -->|Yes| Defer[Retry closure on a later snapshot]
