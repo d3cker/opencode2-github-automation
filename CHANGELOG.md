@@ -47,6 +47,12 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Added
 
+- Per-repository `autoApproveRepositoryFiles` configuration, an opt-in setup
+  prompt, and `init --auto-approve-repository-files`. Bot sessions and native
+  workers can automatically access files in the repository and assigned worktree
+  across rounds/restarts, without global permission changes. Explicit denials,
+  pending questions, media-helper limits, and shell permissions remain unchanged.
+
 - Cancel a single bot round while retaining issue/PR tracking, with durable stop
   recovery, preserved draft worktrees and fresh worktrees for later feedback.
   Resume tracking a locally closed task without replaying its abandoned round

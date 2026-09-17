@@ -98,6 +98,14 @@ and respects `XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR`.
 3. Load the project with the [headless command below](#run-without-the-tui), or
    open it with `opencode2 /absolute/path/to/your-project`.
 
+The wizard can enable automatic file access within this repository and its bot
+worktrees. Choose **yes** at the file-access prompt, or pass
+`--auto-approve-repository-files` to `init`. Existing projects can set
+`"autoApproveRepositoryFiles": true` in their configuration. This does not change
+global permissions or approve arbitrary shell commands. See
+[repository file approvals](docs/configuration.md#repository-file-approvals) for
+scope, restart steps, and pending questions.
+
 Settings are saved to `/absolute/path/to/your-project/.opencode/automation.json`.
 If it already exists, edit it directly and skip `init`. Repeat setup for each
 repository; the plugin is installed only once. After editing settings, restart

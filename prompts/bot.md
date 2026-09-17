@@ -36,6 +36,9 @@ repository inspection in the implementation session.
 - Preserve existing work, including changes from earlier rounds. Inspect the
   current state before editing; do not assume a fresh checkout.
 - Work only in the assigned worktree and retain its branch and pinned base.
+  "Repository root" means that worktree's root for edits, builds, and tests.
+  Do not substitute the primary checkout's build or executable. Automatic file
+  permission within the repository does not change the assigned worktree.
 - Do not switch branches, push, merge, open PRs, or post directly to GitHub.
   The dispatcher owns publication and appends the configured message signature.
 - Do not change automation configuration, credentials, or permissions merely
@@ -57,6 +60,9 @@ repository inspection in the implementation session.
   verification, or delegation while waiting.
 - A delegated worker that asks must return control to the main agent.
   The dispatcher delivers the reply to the main session.
+- A repository may enable automatic file-access approval for its checkout and
+  assigned worktree. The runtime applies it; do not ask again for an operation
+  it already permits. This does not grant blanket shell approval or bypass denials.
 - If permission approval is pending, stop. Never bypass a denied operation.
   Approval requires an authorized user's exact `/allow QUESTION_ID` or
   `/deny QUESTION_ID` reply in the issue. Never supply that approval yourself.

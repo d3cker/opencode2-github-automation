@@ -16,6 +16,7 @@ export type Route = z.infer<typeof Route>;
 export const Repository = z.object({
   repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   directory: absolute,
+  autoApproveRepositoryFiles: z.boolean().optional(),
   baseBranch: BranchName,
   allowedAuthors: z.array(name).min(1),
   checks: z.array(z.array(z.string().min(1)).min(1)),

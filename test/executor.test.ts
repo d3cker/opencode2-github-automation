@@ -115,6 +115,10 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     assert.equal(await run(t.worktree!, ["git", "status", "--porcelain"]), "");
     const runtimePath = join(t.worktree!, ".opencode/plugins/automation-runtime/index.js");
     assert.match(await readFile(runtimePath, "utf8"), /workerPlugin/);
+    const optedIn = GithubOptions.parse({ ...options, repositories: [{ ...repo, autoApproveRepositoryFiles: true }] });
+    await installWorkerPlugin(t.worktree!, optedIn, run);
+    assert.match(await readFile(runtimePath, "utf8"), /"autoApproveRepositoryFiles":true/);
+    assert.equal(await run(t.worktree!, ["git", "status", "--porcelain"]), "");
     await assert.rejects(git.verify(t, repo), Blocked);
     await writeFile(join(t.worktree!, "counter.txt"), "fixed\n");
     Object.assign(t, await git.verify(t, repo)); await git.push(t, repo);

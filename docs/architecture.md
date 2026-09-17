@@ -63,6 +63,10 @@ The easy setup writes a per-project `.opencode/automation.json`. Global plugin
 loaders remain inactive in projects without configuration. Account defaults come
 from GitHub authentication, while the wizard queries OpenCode for a model default.
 User-configured values are preserved rather than replaced during upgrades.
+An opt-in repository file-access policy is stored in that project's configuration
+and passed to its worktree runtime. Permission hooks apply it to associated bot
+sessions and native workers using canonical paths, while retaining explicit
+denials, shell rules, and the media helper's no-tools restriction.
 
 The primary checkout owns scheduling. Worker worktrees do not start additional
 schedulers. A shared Git-directory state folder holds the queue and locks; separate

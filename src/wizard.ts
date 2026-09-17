@@ -3,7 +3,7 @@ import { Capabilities, BranchName } from "./config.js";
 import { z } from "zod";
 
 export type Question = (message: string) => Promise<string>;
-export type SetupValues = { baseBranch?: string; capabilities?: ("text" | "vision" | "audio")[]; mediaModel?: { model: string; capabilities: ("text" | "vision" | "audio")[] }; model?: string; trigger?: string; signature?: string; authors?: string[]; everySeconds?: number; check?: string[] | false; autoMerge?: { enabled: boolean; method: "merge" | "squash" | "rebase" } };
+export type SetupValues = { autoApproveRepositoryFiles?: boolean; baseBranch?: string; capabilities?: ("text" | "vision" | "audio")[]; mediaModel?: { model: string; capabilities: ("text" | "vision" | "audio")[] }; model?: string; trigger?: string; signature?: string; authors?: string[]; everySeconds?: number; check?: string[] | false; autoMerge?: { enabled: boolean; method: "merge" | "squash" | "rebase" } };
 export async function configure(question: Question, defaults: { login: string; model?: string; check?: string[]; capabilities?: ("text" | "vision" | "audio")[] }, supplied: SetupValues = {}) {
   async function ask<T>(label: string, fallback: string | undefined, parse: (value: string) => T): Promise<T> {
     let error = "";
@@ -42,5 +42,9 @@ export async function configure(question: Question, defaults: { login: string; m
     if (/["'|;&<>`$\\]/.test(value)) throw new Error("Use a JSON argument array");
     return z.array(z.string().min(1)).min(1).parse(value.split(/\s+/));
   });
-  return EasyOptions.parse({ model, capabilities, ...(mediaModel ? { mediaModel } : {}), ...(baseBranch ? { baseBranch } : {}), trigger, signature, authors, everySeconds, autoMerge: { enabled, method }, check });
+  const autoApproveRepositoryFiles = supplied.autoApproveRepositoryFiles ?? await ask("Automatically approve file access in this repository and its task worktrees (yes/no; shell permissions unchanged)", "no", value => {
+    if (!["yes", "no", "y", "n"].includes(value.toLowerCase())) throw new Error("Expected yes or no");
+    return ["yes", "y"].includes(value.toLowerCase());
+  });
+  return EasyOptions.parse({ autoApproveRepositoryFiles, model, capabilities, ...(mediaModel ? { mediaModel } : {}), ...(baseBranch ? { baseBranch } : {}), trigger, signature, authors, everySeconds, autoMerge: { enabled, method }, check });
 }

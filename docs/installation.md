@@ -78,7 +78,8 @@ GitHub user, not the repository owner. The model default is queried from the run
 OpenCode service; without it, the model is required. Command-line flags override
 prompts. `--skip-tests` explicitly disables tests; Enter otherwise accepts the
 shown test command or `skip`.
-The wizard also asks for model capabilities, a vision helper if the main model
+The wizard also asks whether to auto-approve repository file access (default no),
+plus model capabilities, a vision helper if the main model
 lacks vision, and the base branch. Existing JSON files can be extended manually;
 see [runtime settings](runtime.md).
 

@@ -39,13 +39,15 @@ test("minimal setup resolves repository, account, branch, private state and both
     await writeFile(join(directory, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
     const result = await resolveEasy(directory, { model: "deepseek/model/variant" }, execute, fetcher);
     assert.equal(result.repo, "owner/project");
+    assert.equal(result.github.repositories[0]?.autoApproveRepositoryFiles, undefined);
     assert.deepEqual(result.github.repositories[0]?.allowedAuthors, ["alice"]);
     assert.equal(result.github.repositories[0]?.baseBranch, "develop");
     assert.equal(result.github.routes["@opencodebot"]?.model.id, "model/variant");
     assert.equal(result.scheduler.jobs[0]?.everySeconds, 60);
     assert.equal(result.scheduler.stateDirectory, result.github.stateDirectory);
     assert.ok(result.github.stateDirectory.endsWith("/.git/opencode2-automation"));
-    const overridden = await resolveEasy(directory, { model: "provider/model", trigger: "@fix", everySeconds: 120, authors: ["bob"], check: ["pytest", "-q"] }, execute, fetcher);
+    const overridden = await resolveEasy(directory, { model: "provider/model", trigger: "@fix", autoApproveRepositoryFiles: true, everySeconds: 120, authors: ["bob"], check: ["pytest", "-q"] }, execute, fetcher);
+    assert.equal(overridden.github.repositories[0]?.autoApproveRepositoryFiles, true);
     assert.deepEqual(overridden.github.repositories[0]?.checks, [["pytest", "-q"]]);
     assert.deepEqual(overridden.github.repositories[0]?.allowedAuthors, ["bob"]);
     assert.equal(overridden.scheduler.jobs[0]?.everySeconds, 120);

@@ -35,7 +35,15 @@ not by excluding the posting account's login. GitHub Bot accounts and unauthoriz
 authors are also excluded. A regular comment from the shared account can answer
 a question; the bot's own marked question, acknowledgement, or other post cannot.
 
-For permission requests, use the exact `/allow QUESTION_ID` or `/deny QUESTION_ID`
+When `autoApproveRepositoryFiles` is enabled for the repository, the runtime
+approves eligible file-access requests within the checkout and assigned worktree,
+including native subagents and later rounds. It still honors explicit denials and
+does not grant shell permissions or tools to media helpers. A new session does not
+need to repeat `/allow` for these eligible file requests. Existing unanswered
+questions still require their explicit replies. See
+[repository file approvals](configuration.md#repository-file-approvals).
+
+For permission requests that still require a reply, use the exact `/allow QUESTION_ID` or `/deny QUESTION_ID`
 shown in the question as your entire reply. Plain conversation does not grant
 permission. The decision is scoped to the operation and resource set in the
 current main session and its workers; explicit OpenCode deny rules still apply.

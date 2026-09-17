@@ -53,6 +53,7 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 
 | Field | Purpose |
 | --- | --- |
+| `autoApproveRepositoryFiles` | Opt-in automatic `external_directory`, `read`, and `edit` approval within this repository and its assigned task worktree; omitted/`false` keeps existing permission behavior. Shell rules are unchanged. |
 | `baseBranch` | Base for new worktrees and PRs; defaults to the GitHub default branch. |
 | `capabilities` | Main model support: `text`, `vision`, `audio`; defaults to `["text"]`. |
 | `mediaModel` | Separate helper model and its capabilities; example below. |
@@ -80,10 +81,52 @@ cd /absolute/path/to/your-project
 "$HOME/.local/bin/opencode2-automation" init --model provider/model --skip-tests --yes
 ```
 
-Optional flags: `--base-branch develop`, `--capabilities text`,
+Optional flags: `--auto-approve-repository-files`, `--base-branch develop`, `--capabilities text`,
 `--media-model provider/vision-model`, `--media-capabilities text,vision`,
 `--system-prompt .opencode/bot.md`. With `--yes`, supply a helper explicitly
 if you want media support with a text-only main model.
+
+## Repository file approvals
+
+During interactive `init`, choose **yes** for "Automatically approve file access
+in this repository and its task worktrees". The default is **no**. Noninteractive
+setup opts in with `--auto-approve-repository-files`; `--yes` alone does not enable it.
+For an existing project, add this field to its existing `.opencode/automation.json`
+without rerunning `init` or replacing the other settings:
+
+```json
+{
+  "model": "provider/model",
+  "autoApproveRepositoryFiles": true
+}
+```
+
+This is a plugin setting for this repository, not a global OpenCode permission.
+The runtime resolves the configured checkout path automatically, and also includes
+the assigned task worktree when advanced state storage places it outside the
+checkout. The policy follows new rounds and native subagents through their main
+task; it is not tied to a previous session's `/allow` reply. Other repositories
+and ordinary non-bot sessions are unaffected. No user-wide configuration is written.
+
+Only `ask` decisions for `external_directory`, `read`, and `edit` qualify. Every
+resource must resolve inside the repository or assigned worktree. Symlink targets
+are checked, including existing parents of new files. Paths to siblings, symlink
+escapes, unknown patterns, and unresolvable boundaries use the normal approval
+flow. Explicit OpenCode denials and exact saved `/deny` decisions remain effective.
+Media helpers remain read-only and cannot use tools. Shell, network, subagent
+launch, and other action permissions are unchanged; a shell command can affect
+files outside its working directory, so its location does not grant blanket consent.
+
+After changing the setting, restart the idle service and activate the owner again.
+The executor refreshes generated worktree runtime settings before continuing a
+saved session. An already-pending permission question still needs its exact
+`/allow QUESTION_ID` or `/deny QUESTION_ID` reply; enabling this option does not
+answer it or bypass unrelated pending questions. Existing configs remain opt-out.
+Set the field to `false` and reload to disable automatic file approval; previously
+saved explicit approvals still have their original session scope.
+
+The model must still build, edit, and test in its assigned worktree. Permission to
+access another checkout does not make that checkout the correct validation target.
 
 ## Questions, branches, media, and bot instructions
 

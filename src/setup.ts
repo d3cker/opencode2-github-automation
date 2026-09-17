@@ -48,12 +48,13 @@ async function main() {
     "base-branch": { type: "string" }, capabilities: { type: "string" }, "media-model": { type: "string" }, "media-capabilities": { type: "string" }, "system-prompt": { type: "string" },
     signature: { type: "string" }, authors: { type: "string", multiple: true },
     model: { type: "string" }, check: { type: "string", multiple: true }, trigger: { type: "string" },
+    "auto-approve-repository-files": { type: "boolean" },
     "skip-tests": { type: "boolean", default: false },
     yes: { type: "boolean", default: false },
     local: { type: "boolean", default: false }, help: { type: "boolean", short: "h" },
   } });
   if (values.help || positionals[0] !== "init" || positionals.length !== 1) {
-    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation list [--json] [--discover /path/to/projects]\n       opencode2-automation retry owner/repo#123 [--restart-session]\n       opencode2-automation restartworkflow owner/repo#123\n       opencode2-automation cancelround owner/repo#123\n       opencode2-automation resumetracking owner/repo#123\ninstall registers the global plugin. list works from any directory. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
+    console.log("Usage: opencode2-automation install\n       opencode2-automation init [--model provider/model] [--trigger @opencodebot] [--base-branch name] [--capabilities text,vision,audio] [--media-model provider/model] [--media-capabilities text,vision] [--system-prompt path.md] [--signature text] [--authors login (repeatable)] [--check executable --check argument | --skip-tests] [--auto-approve-repository-files] [--local] [--yes]\n       opencode2-automation <status|scan|pause|resume|run|upgrade>\n       opencode2-automation list [--json] [--discover /path/to/projects]\n       opencode2-automation retry owner/repo#123 [--restart-session]\n       opencode2-automation restartworkflow owner/repo#123\n       opencode2-automation cancelround owner/repo#123\n       opencode2-automation resumetracking owner/repo#123\ninstall registers the global plugin. list works from any directory. Run other commands inside your repository. --local enables an installation in .opencode/node_modules.");
     return;
   }
   const { root, primary } = await checkout(process.cwd());
@@ -62,6 +63,7 @@ async function main() {
   const detected = await detectCheck(root);
   const check = values["skip-tests"] ? false : values.check ?? detected;
   const extensions = {
+    ...(values["auto-approve-repository-files"] !== undefined ? { autoApproveRepositoryFiles: values["auto-approve-repository-files"] } : {}),
     ...(values["base-branch"] ? { baseBranch: values["base-branch"] } : {}),
     ...(values.capabilities ? { capabilities: values.capabilities.split(",").map(s => s.trim()) as ("text" | "vision" | "audio")[] } : {}),
     ...(values["media-model"] ? { mediaModel: { model: values["media-model"], capabilities: (values["media-capabilities"] ?? "text,vision").split(",").map(s => s.trim()) as ("text" | "vision" | "audio")[] } } : {}),
