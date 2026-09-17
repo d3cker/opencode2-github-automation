@@ -61,6 +61,8 @@ export default Plugin.define({
         monitor: async () => dispatcher.monitor(),
         repositories: async () => listRepositories(),
         retry: async ({ key, restartSession }) => { controller.signal.throwIfAborted(); return { accepted: await dispatcher.retry(key, restartSession) }; },
+        cancelround: async ({ key }) => ({ accepted: await dispatcher.cancelRound(key) }),
+        resumetracking: async ({ key }) => ({ accepted: await dispatcher.cancelRound(key, true) }),
         close: async ({ key }) => ({ accepted: await dispatcher.closeTask(key) }),
         restartworkflow: async ({ key }) => ({ accepted: await dispatcher.restartWorkflow(key) }),
       });

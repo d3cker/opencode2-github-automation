@@ -6,6 +6,7 @@ import type { Activity } from "../src/activity.js";
 
 const activity: Activity = { key: "owner/repo#1", repo: "owner/repo", issueNumber: 1, round: 1, phase: "running", status: "ready", sessionID: "ses_test", sessionReady: true, worktree: "/worktree" };
 function fixture(initial: Activity[] = [], restored: string[] = []) {
+  const cancelled: string[] = [], resumed: string[] = [];
   const recovered: string[] = [], alerts: unknown[] = [], ended: string[] = [];
   const choices: (string | undefined)[] = [];
   let recoveryError: Error | undefined;
@@ -20,7 +21,7 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
     location: { directory: "/repo" },
-    client: { rpc: () => ({ repositories: async (_input: unknown, request: unknown) => { repositoryRequests.push(request); if (repositoriesError) throw new Error("Unavailable"); return repositoryReport; }, activity: async () => initial, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
+    client: { rpc: () => ({ repositories: async (_input: unknown, request: unknown) => { repositoryRequests.push(request); if (repositoriesError) throw new Error("Unavailable"); return repositoryReport; }, activity: async () => initial, cancelround: async ({ key }: { key: string }) => { cancelled.push(key); return { accepted: true }; }, resumetracking: async ({ key }: { key: string }) => { resumed.push(key); return { accepted: true }; }, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
     data: { session: { sync: async () => {} } },
     keymap: { layer: (get: () => { commands: { slash: { name: string }; run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; for (const cmd of get().commands) commands.set(cmd.slash.name, cmd.run); } },
     ui: {
@@ -36,7 +37,7 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { repositoryRequests, repositoriesError: () => { repositoriesError = true; }, ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { cancelled, resumed, repositoryRequests, repositoriesError: () => { repositoriesError = true; }, ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -166,5 +167,34 @@ test("/bot lists remote repositories even with no tasks and never starts or rest
     assert.deepEqual(f.recovered, []); assert.deepEqual(f.ended, []); assert.deepEqual(f.navigated, []);
     f.repositoriesError(); f.choose("repositories"); await f.command();
     assert.match(JSON.stringify(f.alerts.at(-1)), /Repositories unavailable/);
+  } finally { f.stop(); }
+});
+
+test("cancel round and resume tracking are separate confirmed owner actions, not task closure", async () => {
+  const f = fixture();
+  try {
+    f.event(activity);
+    f.choose(activity.key, "cancelround", "back"); await f.command(); assert.deepEqual(f.cancelled, []);
+    f.choose(activity.key, "cancelround", "confirm"); await f.command(); assert.deepEqual(f.cancelled, [activity.key]);
+    assert.deepEqual(f.ended, []);
+    f.event({ ...activity, controlVersion: 1, status: "closed" });
+    f.choose(activity.key, "resumetracking", "confirm"); await f.command(); assert.deepEqual(f.resumed, [activity.key]);
+    f.event({ ...activity, controlVersion: 2, status: "watching" });
+    f.event({ ...activity, controlVersion: 1, status: "closed" }); // stale event cannot undo explicit resume
+    f.choose(activity.key, "details"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /Status: watching/);
+    assert.deepEqual(f.ended, []);
+  } finally { f.stop(); }
+});
+
+test("late start events cannot revive a cancelled round in the UI", async () => {
+  const f = fixture();
+  try {
+    f.event({ ...activity, controlVersion: 1, status: "cancelling" });
+    f.event({ ...activity, controlVersion: 1, status: "watching" });
+    f.event({ ...activity, controlVersion: 1, status: "ready" });
+    assert.deepEqual(f.opened, []);
+    f.event({ ...activity, round: 2, controlVersion: 1, status: "ready", sessionID: "new" });
+    assert.deepEqual(f.opened, ["new"]);
   } finally { f.stop(); }
 });

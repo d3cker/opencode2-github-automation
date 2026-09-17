@@ -68,3 +68,14 @@ test("sidebar names attention tasks and excludes locally closed tasks from live 
   assert.match(text(state), /1 blocked\/failed/);
   assert.equal(selectedTask(state)?.key, "owner/repo#3");
 });
+
+test("closed and watching tasks do not display historical failures as live errors", () => {
+  for (const status of ["closed", "watching"]) {
+    const state = structuredClone(snapshot); delete state.dispatcher!.activeTask;
+    state.dispatcher!.worker = "idle";
+    state.dispatcher!.tasks = [{ ...state.dispatcher!.tasks[0]!, status, attempts: 1, ...(status === "closed" ? { error: "Old session failure" } : { historicalError: "Old session failure" }) }];
+    const lines = text(state, 1000, "one");
+    assert.doesNotMatch(lines, /Old session failure|Failed attempts|Verifying changes/);
+    assert.match(lines, status === "closed" ? /Tracking closed/ : /Watching issue — round cancelled/);
+  }
+});

@@ -28,7 +28,7 @@ steps, project setup, headless operation, and removal.
 | [docs/architecture.md](docs/architecture.md) | Component responsibilities, a short issue-to-PR overview, configuration ownership, scheduler ownership, and shared state. | Start here to understand how the system is divided before locating implementation code. |
 | [docs/bot-workflow.md](docs/bot-workflow.md) | Eight Mermaid diagrams and detailed implementation notes: startup and polling; discovery and routing; task phases; sessions and questions; media helpers; verification and publication; feedback, merging, and tab closure; status, retries, and recovery. Includes links to the source for each area. | Use for exact execution order, state transitions, checkpoint behavior, failure paths, and tracing a bot task from issue to merged PR. |
 | [docs/configuration.md](docs/configuration.md) | The standard `.opencode/automation.json` format, defaults, setup flags, configuration tracking across Git branches, authors, triggers, checks, base branches, model capabilities, media helpers, custom prompts, signatures, and auto-merge settings. | Use when adding or changing user-facing configuration, defaults, or setup examples. |
-| [docs/runtime.md](docs/runtime.md) | User-visible behavior while the bot runs: GitHub questions and permission replies, branch selection, media inputs, prompt loading, follow-up comments, session tabs, runtime sidebar/status freshness, host repository inventory and discovery, local task closure, and routine management commands. | Use when changing issue conversations, session continuation, runtime tools, or TUI behavior. |
+| [docs/runtime.md](docs/runtime.md) | User-visible behavior while the bot runs: GitHub questions and permission replies, branch selection, media inputs, prompt loading, follow-up comments, session tabs, runtime sidebar/status freshness, host repository inventory and discovery, local task closure, cancelling rounds while retaining tracking, and routine management commands. | Use when changing issue conversations, session continuation, runtime tools, or TUI behavior. |
 | [docs/advanced.md](docs/advanced.md) | Separate scheduler/dispatcher setup, multiple repositories, custom RPC jobs, full options, timeouts, management and retry commands, persistence, reconciliation, locks, and known limits. | Use for low-level configuration, operational troubleshooting, recovery, or ownership/concurrency changes. |
 | [docs/installation.md](docs/installation.md) | Loader registration, config-directory precedence, prerequisites, source installation, project-local installation, upgrade conflicts, testing on another machine, and migration limits. | Use when working on packaging, installers, registration, upgrades, or deployment troubleshooting. |
 | [docs/releases.md](docs/releases.md) | Feature-to-devel and devel-to-release PR checks, automatic patch versions, manual npm version/tag releases, exact changelog notes, publication recovery, README commits on release, automatic release-to-devel synchronization, and promotion PRs into protected main. | Use for CI triggers, versioning, packaging, GitHub Release publication, branch permissions, or recovery after a failed release. |
@@ -62,11 +62,12 @@ the installation block without making remote writes. Keep its markers intact.
   and GitHub plugin entrypoints. `src/easy.ts` resolves standard project settings;
   `src/config.ts` defines the configuration schemas and route matching.
 - `src/dispatcher.ts` owns discovery, the durable task lifecycle, questions,
-  feedback rounds, publication coordination, retries, durable task closure, and merge polling.
+  feedback rounds, publication coordination, retries, durable task closure, round cancellation/resumption, and merge polling.
   `src/scheduler.ts` owns interval jobs; `src/state.ts` owns persistence and locks.
 - `src/executor.ts` owns analysis, base selection, worktrees, session execution,
   verification, and pushing. `src/analysis.ts` and `src/branch.ts` validate model
-  decisions. `src/github.ts` implements GitHub calls; `src/approval.ts` evaluates
+  decisions. `src/pr-description.ts` extracts final public reports and renders and
+  reconciles managed PR descriptions. `src/github.ts` implements GitHub calls; `src/approval.ts` evaluates
   approval candidates.
 - `src/runtime.ts`, `src/worker.ts`, and `src/bridge.ts` implement worker hooks,
   runtime installation, and communication with the owner. `src/prompt.ts` loads

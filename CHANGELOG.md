@@ -22,11 +22,22 @@ include the full version, for example `## 0.7.0-beta.1`.
   snapshots. Isolate setup-test registries so validation never adds fixture
   repositories to the operator's inventory.
 
+- Use the successful session's final completion report as the PR description instead
+  of its initial acknowledgement. Persist reports across restarts, retain the
+  original summary plus the latest follow-up, distinguish dispatcher checks from
+  agent-reported tests, and preserve manual notes outside the managed section.
+
 - Reconcile timed-out or interrupted sessions completed manually after a blocked
   task or service restart. Verify and publish through the dispatcher, then process
   queued issue feedback on the same branch and PR, including legacy checkpoints.
 
 ### Added
+
+- Cancel a single bot round while retaining issue/PR tracking, with durable stop
+  recovery, preserved draft worktrees and fresh worktrees for later feedback.
+  Resume tracking a locally closed task without replaying its abandoned round
+  or old comments. Expose both actions in `/bot` and the CLI; show historical
+  errors only in details after closing or cancelling.
 
 - List configured repositories across the host with `opencode2-automation list`
   (`--json` for scripts) and `/bot` → **Repositories**. Show owner/checkout paths,

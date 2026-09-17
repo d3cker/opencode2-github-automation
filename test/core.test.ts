@@ -30,11 +30,13 @@ function fixture() {
     ensureComment: async () => { events.push("comment"); return 42; },
     findPull: async () => undefined,
     pull: async (_repo, number) => ({ number, html_url: `https://github.com/owner/repo/pull/${number}`, state: "open" }),
+    updatePullBody: async () => {},
     ensurePull: async () => { events.push("pr"); return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; },
   };
   const executor: Executor = {
     selectBase: async (_task, repo) => ({ kind: "branch", branch: repo.baseBranch }),
     hasBranch: async () => true,
+    summary: async t => ({ text: "Implemented counter behavior.", sessionID: t.sessionID, round: t.round }),
     title: async () => "Repair counter increment",
     analyze: async () => { events.push("analyze"); return { kind: "proceed", comment: "Problem and verification plan" }; },
     prepare: async () => { events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; },
@@ -398,7 +400,7 @@ test("PR explicitly reports skipped tests without claiming a pass", async () => 
   };
   const d = f.make(); await d.init(); await d.scan(); await d.tick();
   assert.equal(d.status()[0]?.status, "done");
-  assert.match(body, /Automated tests were not run/);
+  assert.match(body, /No automated test command is configured for the dispatcher/);
   assert.ok(!body.includes("passed"));
 });
 test("closed issue cannot start a fix", async () => {
@@ -885,4 +887,213 @@ test("closure during verification waits for local work and prevents the followin
   finish(); await work; await d.settle();
   assert.equal(d.status()[0]!.status, "closed");
   assert.equal(f.events.includes("push"), false); assert.equal(f.events.includes("pr"), false);
+});
+
+test("completion is persisted before verification, bound to its commit and reused after publication failure", async () => {
+  const f = fixture(); let summaries = 0, body = "", updates = 0;
+  f.executor.summary = async t => { summaries++; return { text: "Delivered the final behavior.", sessionID: t.sessionID, round: t.round }; };
+  f.executor.verify = async () => {
+    assert.equal(f.store.data.tasks[0]?.completion?.text, "Delivered the final behavior.");
+    return { checks: ["unit checks passed"], commit: "verified-sha" };
+  };
+  f.github.ensurePull = async (_repo, _branch, _base, _title, text) => { body = text; return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; };
+  f.github.updatePullBody = async () => { if (++updates === 1) throw new Error("lost update response"); };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.phase, "publishing");
+  assert.equal(d.status()[0]?.completion?.commit, "verified-sha");
+  assert.match(body, /Delivered the final behavior/); assert.doesNotMatch(body, /Problem and verification plan/);
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
+  assert.equal(summaries, 1); assert.equal(restarted.status()[0]?.status, "done");
+  assert.equal(restarted.status()[0]?.publishedBody, body);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
+
+test("follow-up publication keeps the initial report and updates the same PR from the new session only after push", async () => {
+  const f = fixture(); const bodies: string[] = [];
+  f.executor.run = async (t, checkpoint) => { await checkpoint({ sessionID: `ses_round_${t.round ?? 1}` }); };
+  f.executor.summary = async t => ({ text: `Delivered round ${t.round ?? 1}.`, sessionID: t.sessionID, round: t.round });
+  f.github.updatePullBody = async (_r, _n, _commit, _key, body, previous) => {
+    assert.equal(f.events.at(-1), bodies.length ? "push" : "pr");
+    if (bodies.length) assert.equal(previous, bodies[0]);
+    bodies.push(body);
+  };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.github.comments = async () => [{ id: 43, body: "Improve bindings", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.round, 2); assert.equal(d.status()[0]?.status, "done");
+  assert.match(bodies[1]!, /Delivered round 1/); assert.match(bodies[1]!, /Delivered round 2/);
+  assert.match(bodies[1]!, /Latest update — round 2/);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+for (const phase of ["verifying", "publishing"] as const) {
+  test(`legacy ${phase} checkpoint recovers a missing summary without rerunning implementation`, async () => {
+    const f = fixture(), d = f.make(); await d.init(); await d.scan();
+    const t = f.store.data.tasks[0]!;
+    Object.assign(t, { phase, sessionID: "ses_legacy", worktree: "/worktree", baseSha: "base", baseBranch: "main", commit: "sha", checks: ["saved check passed"] });
+    let body = "", reads = 0;
+    f.executor.summary = async () => { reads++; return { unavailable: "The saved completion session is no longer available." }; };
+    f.github.updatePullBody = async (_r, _n, _c, _k, text) => { body = text; };
+    const restarted = f.make(); await restarted.init(); await restarted.tick();
+    assert.equal(restarted.status()[0]?.status, "done"); assert.equal(reads, 1);
+    assert.match(body, /Summary unavailable: The saved completion session is no longer available/);
+    assert.match(body, /Verified commit: sha/);
+    assert.equal(f.events.includes("run"), false);
+    assert.equal(f.events.includes("verify"), phase === "verifying");
+  });
+}
+
+test("cancel a live round drains work, preserves history and keeps watching without publication", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_cancelled" }); entered(); await pending; await checkpoint({ sessionReady: true }); };
+  f.executor.cancel = async () => { finish(); };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  assert.equal(await d.cancelRound("owner/repo#1"), true);
+  await work; await d.settle();
+  const t = d.status()[0]!;
+  assert.equal(t.status, "watching"); assert.equal(t.cancelledRounds?.[0]?.sessionID, "ses_cancelled");
+  assert.equal(t.cancelledRounds?.[0]?.worktree, "/worktree");
+  assert.equal(f.events.includes("verify"), false); assert.equal(f.events.includes("push"), false);
+  assert.equal(d.runtime("ses_cancelled"), null);
+  await d.tick(); assert.equal(d.status()[0]!.status, "watching");
+  assert.equal(await d.cancelRound(t.key), false);
+});
+
+test("cancellation survives restart and failed interruption without losing new feedback", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.cancel = async () => { throw new Error("interrupt unavailable"); };
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "cancelling");
+  assert.match(d.activity()[0]!.error!, /interrupt unavailable/);
+  assert.equal(d.monitor().worker, "maintenance");
+  await assert.rejects(d.closeTask("owner/repo#1"), /cancellation is still/);
+  f.github.comments = async () => [{ id: 44, body: "New scope only", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]!.pendingFeedback?.length, 0);
+  f.executor.cancel = async () => {};
+  f.advance(); const next = f.make(); await next.init(); await next.tick(); await next.settle();
+  assert.equal(next.status()[0]!.status, "watching"); assert.equal(next.status()[0]!.cancelledRounds?.length, 1);
+  await next.scan(); assert.equal(next.status()[0]!.pendingFeedback?.length, 1);
+  f.executor.prepare = async t => {
+    assert.equal(t.worktree, undefined); assert.match(t.localBranch!, /-r2$/);
+    assert.equal(t.feedback?.[0]?.body, "New scope only");
+    return { worktree: "/new-worktree", baseSha: "base" };
+  };
+  await next.tick(); assert.equal(next.status()[0]!.status, "done");
+  assert.equal(next.status()[0]!.round, 2); assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("cancelling follow-up retains the PR and published head; a new round updates that PR", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const pr = d.status()[0]!.pr!;
+  f.github.findPull = async () => pr;
+  f.github.comments = async () => [{ id: 43, body: "Unwanted step", user: { login: "alice" } }];
+  f.executor.run = async () => { throw new Blocked("Stopped unwanted work"); };
+  await d.scan(); await d.tick();
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.deepEqual(d.status()[0]!.pr, pr);
+  assert.equal(d.status()[0]!.publishedHead?.commit, "sha");
+  assert.equal(d.activity()[0]!.error, undefined); assert.match(d.activity()[0]!.historicalError!, /Stopped unwanted/);
+  f.github.comments = async () => [{ id: 44, body: "A different step", user: { login: "alice" } }];
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_third" }); };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "done"); assert.equal(d.status()[0]!.round, 3);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("resuming closed tracking skips the old round and backlog, admitting only future feedback", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  await d.closeTask("owner/repo#1"); await d.settle();
+  const epoch = d.status()[0]!.controlVersion!;
+  f.github.comments = async () => [{ id: 44, body: "Old backlog", user: { login: "alice" } }];
+  await d.cancelRound("owner/repo#1", true); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.equal(d.status()[0]!.controlVersion, epoch + 1);
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "watching");
+  assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+  f.github.comments = async () => [{ id: 45, body: "New authorized task", user: { login: "alice" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "done");
+});
+
+test("closed or missing GitHub objects leave tracking closed on resume", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  await d.closeTask("owner/repo#1"); await d.settle();
+  f.github.pull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "closed" });
+  await assert.rejects(d.cancelRound("owner/repo#1", true), /PR is no longer open/);
+  assert.equal(d.status()[0]!.status, "closed");
+  f.github.issue = async () => { throw new GithubError(404); };
+  await assert.rejects(d.cancelRound("owner/repo#1", true), /404/);
+  assert.equal(d.status()[0]!.status, "closed");
+});
+
+test("cancellation refuses in-flight publication and waits for verification before watching", async () => {
+  for (const operation of ["verify", "push"] as const) {
+    const f = fixture(); let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+    if (operation === "verify") f.executor.verify = async () => { entered(); await pending; return { checks: [], commit: "local" }; };
+    else f.executor.push = async () => { entered(); await pending; };
+    const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+    if (operation === "push") await assert.rejects(d.cancelRound("owner/repo#1"), /already in flight/);
+    else { await d.cancelRound("owner/repo#1"); assert.equal(d.status()[0]!.status, "cancelling"); }
+    finish(); await work; await d.settle();
+    assert.equal(d.status()[0]!.status, operation === "verify" ? "watching" : "done");
+    if (operation === "verify") assert.equal(f.events.includes("pr"), false);
+  }
+});
+
+test("a permission answer to an archived cancelled question does not start another round", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_permission" }); await d.question("ses_permission", "permission1", "Allow?", { action: "external_directory", resources: ["/tmp"] }); };
+  await d.tick(); await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.comments = async () => [{ id: 44, body: "/allow permission1", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "watching"); assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+});
+
+test("watching auto-merge uses only the last published head, never a cancelled round's commit", async () => {
+  for (const saved of [true, false]) {
+    const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+    Object.assign(f.store.data.tasks[0]!, { status: "watching", commit: "cancelled-unpublished", publishedHead: saved ? { commit: "previous-published", at: 1000 } : undefined });
+    const heads: string[] = [];
+    f.github.mergeApproved = async (_repo, _pr, head) => { heads.push(head); return true; };
+    const resumed = f.make(); await resumed.init(); await resumed.tick();
+    assert.deepEqual(heads, saved ? ["previous-published"] : []);
+  }
+});
+
+test("after cancellation, comment-routed issues accept new authorized feedback without another mention", async () => {
+  const f = fixture(), request = { ...issue, body: "No routing tag", user: { login: "outside" } };
+  f.github.issue = async () => request; f.github.issues = async () => [request];
+  f.github.comments = async () => [{ id: 1, body: "@deepseek original task", user: { login: "alice" } }];
+  const d = f.make(); await d.init(); await d.scan(); await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.comments = async () => [{ id: 2, body: "Do the new task", user: { login: "alice" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "done");
+});
+
+test("failed cancellation completion save remains cancellable and archives the round only once on retry", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  const save = f.store.save.bind(f.store); let fail = true;
+  f.store.save = async q => { if (fail && q.tasks[0]?.status === "watching") { fail = false; throw new Error("disk write failed"); } await save(q); };
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "cancelling"); assert.equal(d.status()[0]!.cancelledRounds, undefined);
+  assert.match(d.activity()[0]!.error!, /disk write failed/);
+  f.advance(); await d.tick(); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.equal(d.status()[0]!.cancelledRounds?.length, 1);
+});
+
+test("cancelling before PR creation does not reuse the cancelled summary as the next PR's original report", async () => {
+  const f = fixture(), d = f.make();
+  const publish = f.github.ensurePull;
+  f.github.ensurePull = async () => { throw new Error("PR creation unavailable"); };
+  f.executor.summary = async t => ({ text: `Result of round ${t.round ?? 1}`, sessionID: t.sessionID, round: t.round });
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.phase, "publishing"); assert.ok(d.status()[0]!.initialCompletion);
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.ensurePull = publish;
+  f.github.comments = async () => [{ id: 43, body: "Different new work", user: { login: "alice" } }];
+  let body = ""; f.github.updatePullBody = async (_r, _n, _c, _k, value) => { body = value; };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "done");
+  assert.match(body, /Result of round 2/); assert.doesNotMatch(body, /Result of round 1/);
 });

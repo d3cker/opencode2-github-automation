@@ -34,11 +34,11 @@ flowchart TD
     Scan --> Save[Persist result, failures and nextAt]
     Save --> Clock
     Due -->|No| Clock
-    Worker --> Closing[Resume due closing requests independently of active worker]
-    Closing --> Clear{Any closure still pending?}
+    Worker --> Closing[Resume due closing and cancelling requests independently of active worker]
+    Closing --> Clear{Any closure or cancellation pending?}
     Clear -->|Yes| Worker
     Clear -->|No| Recover[Probe eligible stopped sessions and recover unpublished questions]
-    Recover --> Round[Promote one done task with pending feedback to a new round]
+    Recover --> Round[Promote one done or watching task with pending feedback to a new round]
     Round --> Select[Choose ready or retry_wait task, saved running session first]
     Select --> Candidate{Candidate exists?}
     Candidate -->|No| Merge[Check eligible merges]
@@ -114,9 +114,9 @@ Sources: [index.ts](../src/index.ts), [easy.ts](../src/easy.ts),
 
 ```mermaid
 flowchart TD
-    Scan[Scan each configured repository] --> PRs[Refresh tracked PRs excluding merged and locally closing or closed tasks]
+    Scan[Scan each configured repository] --> PRs[Refresh tracked PRs excluding merged and locally closing, closed or cancelling tasks]
     PRs --> Issues[List open issues and fetch missing actively tracked issues]
-    Issues --> Skip{PR entry, locally closing or closed task, or closed untracked issue?}
+    Issues --> Skip{PR entry, locally closing, closed or cancelling task, or closed untracked issue?}
     Skip -->|Yes| Ignore[Ignore entry]
     Skip -->|No| Comments[Read comments and filter authorized human comments without bot markers]
     Comments --> Tracked{Task already exists?}
@@ -127,9 +127,9 @@ flowchart TD
     Answer -->|No| Feedback[Append remaining fresh comments to pendingFeedback]
     Remaining --> Feedback
     Feedback --> Cursor[Persist cursor from all observed comments and save queue]
-    Cursor --> Gate{Task done?}
+    Cursor --> Gate{Task done or watching?}
     Gate -->|Yes| Later[Next available worker pass may start a follow-up round]
-    Gate -->|No| Retain[Keep feedback until current round publishes]
+    Gate -->|No| Retain[Keep feedback until publication or cancellation completes]
     Tracked -->|No| Body[Match body route only for an authorized issue author]
     Body --> Found{Body route found?}
     Found -->|Yes| Queue[Persist queued / ready with initial authorized feedback]
@@ -195,7 +195,8 @@ flowchart TD
     Stopped -->|Manual continuation succeeds and probe passes| R
     Stopped -->|Explicit restartworkflow| Recover[Persist recovery intent, rejoin the same session]
     Recover --> R
-    R -->|Validated success, no unresolved question| V[verifying: configured checks and commit]
+    R -->|Validated success, no unresolved question| Report[Persist final public assistant summary with session and round]
+    Report --> V[verifying: configured checks and commit]
     V --> P[publishing: reconcile or create PR, push when required]
     V -->|Failed check or Git consistency guard| VB[verifying / blocked]
     VB -->|Operator retries saved stage| V
@@ -204,6 +205,13 @@ flowchart TD
     PB -->|Eligible retry| P
     Done -->|Pending authorized feedback| Round[Increment round, move feedback and reset per-round state]
     Round --> Q
+    Cancel[Operator confirms Cancel current round] --> Cancelling[Persist cancelling and block new execution]
+    Cancelling --> Archive[Interrupt and drain, archive round and preserve worktree]
+    Archive --> Watching[watching: no replay or publication]
+    Watching -->|New authorized feedback| Fresh[New local branch and worktree from published PR or pinned base]
+    Fresh --> Round
+    Closed -->|Explicit Resume issue tracking| Resume[Validate open GitHub objects, skip observed backlog]
+    Resume --> Cancelling
     Operator[Operator confirms Stop and close task] --> Closing[Persist closing at any saved phase]
     Closing --> Drain[Interrupt known sessions and drain current operation]
     Drain --> Closed[Persist closed and retain work and history]
@@ -302,6 +310,12 @@ sequenceDiagram
         D->>S: Interrupt known task sessions and wait for idleness
         D->>D: Drain in-flight worker and persist closed
         Note over D,G: Preserve work and history, no GitHub closure request
+    else Operator cancels the round
+        U->>D: Confirm Cancel current round
+        D->>D: Persist cancelling and reject new execution checkpoints
+        D->>S: Interrupt saved sessions and wait for idleness
+        D->>D: Drain worker and question posts, archive round, enter watching
+        Note over D,G: Keep PR tracking and future feedback, preserve cancelled worktree
     else Owner is disposed
         Note over D,S: Release local wait without interrupting healthy execution
         Note over D: Replacement owner loads queue and rejoins saved session
@@ -311,6 +325,7 @@ sequenceDiagram
     else Wait completes
         D->>S: Read context and final outcome
         alt Valid task marker, admitted recovery marker if required, and successful final assistant
+            D->>D: Save final public assistant text with session and round
             D->>D: Clear recovery state and advance to verifying
         else Unsuccessful final outcome or assistant
             D->>D: Save session-stop block for later reconciliation
@@ -396,7 +411,7 @@ flowchart TD
     Wait -->|Completed| Result{Succeeded outcome and non-error final assistant with finish stop?}
     Result -->|No| Error
     Result -->|Yes| Return[Return findings to main session, keep main model unchanged]
-    Closing[Local tracking closing or closed] --> Deny[Reject helper registration and runtime lookup]
+    Closing[Local task closing, closed, cancelling or watching] --> Deny[Reject helper registration and runtime lookup]
 ```
 
 Only the owning main bot session can delegate media; the helper-registration
@@ -415,7 +430,8 @@ Source: [runtime.ts — inspect_media](../src/runtime.ts).
 
 ```mermaid
 flowchart TD
-    Start[Validated session success or retry of verifying phase] --> Identity[Require saved workspace and base, exact managed root, branch and shared repository]
+    Start[Validated session success or retry of verifying phase] --> Report[Reuse saved completion summary or recover from saved session]
+    Report --> Identity[Require saved workspace and base, exact managed root, branch and shared repository]
     Identity --> Base[Require baseSha ancestor of HEAD and no unresolved conflicts]
     Base --> Checks[Run configured checks sequentially, or none if list empty]
     Checks -->|Configured check fails| Block[blocked at saved phase, retain work]
@@ -426,26 +442,34 @@ flowchart TD
     Identity -->|Explicit consistency guard fails| Block
     Base -->|Unresolved conflicts| Block
     Validate -->|Explicit consistency guard fails| Block
-    Validate -->|Pass| Save[Persist checks and exact commit SHA, phase publishing]
-    Retry[Retry saved publishing phase] --> Find
-    Save --> Find[Find branch PR including closed PRs]
+    Validate -->|Pass| Save[Persist summary, checks and exact commit SHA, phase publishing]
+    Retry[Retry saved publishing phase] --> Body
+    Save --> Body[Recover missing legacy summary, save original report and render body]
+    Body --> Find[Find branch PR including closed PRs]
     Find --> Follow{Follow-up round?}
     Follow -->|Yes| Open{Existing PR open?}
     Open -->|No| Block
     Open -->|Yes| Push[Validate origin, workspace, saved HEAD and clean tree, push exact SHA]
     Follow -->|No| Exists{PR already exists?}
-    Exists -->|Yes| Done[Record PR and publication time, pr_opened / done]
+    Exists -->|Yes| Closed{PR closed?}
+    Closed -->|Yes| Done[Record PR and publication time, pr_opened / done]
+    Closed -->|No| Description
     Exists -->|No| Title[Generate title only if no saved prTitle]
     Title --> Issue{Issue still open?}
     Issue -->|No| Block
     Issue -->|Yes| PushNew[Validate origin and workspace, push exact verified SHA]
     PushNew --> Create[Create or reconcile signed PR against pinned base]
-    Create --> Done
-    Push --> Done
+    Create --> Description[Read open PR at verified SHA, reconcile managed description]
+    Push --> Description
+    Description -->|Edited managed block, changed head or oversized body| Block
+    Description -->|Unchanged or update succeeds| Acknowledge[Persist published body checkpoint]
+    Acknowledge --> Done
     Failure[Other command, model or transport error] --> Policy[Keep current phase and apply retry policy in section 8]
     Close[Operator closes task before publishing starts] --> Drain[Finish in-flight local operation, reject next checkpoint]
     Drain --> Preserve[Do not publish, preserve existing local changes]
-    InFlight[Publication already in flight] --> Refuse[Reject close request and ask operator to retry after completion]
+    Cancel[Cancel round before publication starts] --> DrainRound[Persist cancelling, drain local work and reject publication]
+    DrainRound --> Watch[Archive work and watch for new comments]
+    InFlight[Publication already in flight] --> Refuse[Reject close or cancel request and retry after completion]
 ```
 
 Resuming `running` validates the saved session first; retrying `verifying` runs
@@ -455,15 +479,36 @@ pushed branch does not by itself make a task complete.
 
 The configured checks are command argument arrays. A failing configured check
 produces `blocked`. With no configured checks, only Git consistency checks run;
-the PR explicitly states that automated tests were not run. Commit hooks changing
+the PR explicitly says the dispatcher did not independently rerun agent-reported
+tests. Commit hooks changing
 the recorded tree, a dirty worktree after commit, or no diff from the base block
 publication. Other command failures use the general error policy below.
 
-The PR body contains the analysis, `Closes #N`, checks, session ID, and verified
-commit SHA. Push uses `COMMIT:refs/heads/TASK_BRANCH` without force. The first
-publication reconciles an existing branch PR by recording it without another
-push; follow-ups require an open PR and push the new verified commit. Follow-ups
-do not regenerate the existing PR title or body.
+The PR body uses the final public text of the successful assistant response,
+with its Markdown preserved, rather than the pre-work analysis acknowledgement.
+The executor saves it with the session and round before verification; verification
+adds the checks and exact commit to the same snapshot. No extra model call rewrites
+the report. Reasoning, tools, and failed or unfinished responses are excluded.
+Missing legacy snapshots are read from the saved session; a missing session or
+empty response produces an explicit summary-unavailable notice, never analysis
+as a fallback. Transport errors retain the stage for retry.
+
+The body keeps the original report and replaces one **Latest update** section on
+follow-ups. Dispatcher checks appear separately from agent-reported tests, followed
+by `Closes #N`, session, round and verified commit. Push uses
+`COMMIT:refs/heads/TASK_BRANCH` without force. The first publication reconciles an
+existing branch PR without another push; follow-ups require an open PR and push
+the new verified commit before updating its description. The title is retained.
+An already closed first-round PR is recorded without editing its description.
+
+A stable HTML marker pair encloses the bot-managed description. Notes outside
+it are preserved; an edited or removed managed section blocks publication rather
+than overwriting it. The last acknowledged body is checkpointed, so a lost update
+response can be reconciled without duplicate sections. Exact legacy descriptions
+can be replaced; otherwise unmarked content is retained and the managed section
+appended. GitHub is reread before writing to detect concurrent edits, although
+there is no atomic compare-and-swap across that read and write. See
+[publication recovery and limits](advanced.md#pr-description-recovery) for details.
 
 Signed comments use stable `opencode2` markers; reconciliation looks for a marker
 posted by the authenticated account. This covers analysis acknowledgements,
@@ -471,19 +516,21 @@ questions, and merge acknowledgements after a lost response.
 
 Sources: [executor.ts — GitWorkspace.verify, push, title](../src/executor.ts),
 [dispatcher.ts — publishing](../src/dispatcher.ts),
-[github.ts — ensureComment, ensurePull](../src/github.ts).
+[github.ts — ensureComment, ensurePull, updatePullBody](../src/github.ts),
+[pr-description.ts — extraction, rendering and reconciliation](../src/pr-description.ts).
 
 ## 7. Feedback, merge approval, and tab closure
 
 ```mermaid
 flowchart TD
-    Pending[Authorized comment enters pendingFeedback] --> Done{Current task done?}
+    Pending[Authorized comment enters pendingFeedback] --> Done{Current task done or watching?}
     Done -->|No| Keep[Retain comment while running, waiting or blocked]
     Keep --> Recovery[Session recovery and publication must finish first]
     Recovery --> Done
-    Done -->|Yes| Round[Next worker pass starts one new round on saved branch and worktree]
-    Round --> Guard[Require open issue, open original PR and authorized feedback, then analyze again]
-    Idle[Worker has no eligible execution task] --> Eligible{Auto-merge enabled and done task eligible?}
+    Done -->|Yes| Round[Next worker pass starts a new round, isolating worktree after cancellation]
+    Round --> Snapshot[Retain original report and published body, reset current completion]
+    Snapshot --> Guard[Require open issue, open original PR and authorized feedback, then analyze again]
+    Idle[Worker has no eligible execution task] --> Eligible{Auto-merge enabled and done or watching task with published head eligible?}
     Eligible -->|No| Later[Wait for a later worker pass]
     Eligible -->|Yes| Since{publishedAt exists?}
     Since -->|No| Window[Record current time as fresh approval window]
@@ -494,7 +541,7 @@ flowchart TD
     Fresh -->|No| Detail[Read GitHub PR details]
     Detail --> Already{Already merged?}
     Already -->|Yes| Ack[Post or reconcile signed merge acknowledgement, persist merged and closed PR]
-    Already -->|No| Head{Open, non-draft PR with saved verified head?}
+    Already -->|No| Head{Open, non-draft PR with saved published head?}
     Head -->|No| Poll[Clear mergeError, set mergeNextAt at least 60 seconds later]
     Head -->|Yes| Review[Evaluate latest decisive reviews and exact approval comments]
     Review --> Author{No outstanding changes request and eligible approver has write, maintain or admin access?}
@@ -510,9 +557,13 @@ flowchart TD
     Ack --> UI[Activity events and TUI polling every 10 seconds]
     Refresh --> UI
     Local[Task closure finishes with status closed] --> UI
-    Menu[bot menu: select issue or Repositories] --> Action[Open session, details, close tabs, restart workflow, stop and close task]
+    Menu[bot menu: select issue or Repositories] --> Action[Open session, details, close tabs, restart, cancel round, resume tracking, stop and close]
     Menu -->|Repositories| Repos[Read connected server inventory, choose repository, show timestamped details]
     Repos --> Observe[No task or scheduler mutation, no activation of other owners]
+    Action -->|Cancel current round| CancelRound[Confirm, stop round, retain PR and issue tracking]
+    Action -->|Resume issue tracking| Resume[Validate closed task, skip backlog and watch future comments]
+    CancelRound --> UI
+    Resume --> UI
     Action -->|Stop and close task| Confirm[Confirm stop and close, queue durable closing request]
     UI --> Busy{Associated tab busy?}
     Busy -->|Yes| Defer[Retry closure on a later snapshot]
@@ -524,7 +575,8 @@ flowchart TD
     Missing --> Sidebar
 ```
 
-Merge eligibility requires `done`, a tracked nonclosed PR, a saved commit, no
+Merge eligibility requires `done`, or `watching` with a saved `publishedHead`,
+a tracked nonclosed PR, a saved published commit, no
 merged flag, no pending feedback, and an elapsed `mergeNextAt`. Missing
 `publishedAt` in an older queue starts a fresh approval window rather than using
 historical approval. Merge checks run when the worker has no execution task to
@@ -549,11 +601,15 @@ or a request failure records `mergeError`; error retries also respect GitHub tim
 An already-merged response can reconcile a previously lost merge response.
 
 Follow-up rounds reset analysis, question, current session, session-stop/recovery
-state, checks, and commit; they retain the branch, worktree, pinned base, and previous session reference.
-Preparation reuses the saved worktree path rather than deriving a new path from
+state, current completion summary, checks, and commit; they retain the original
+report, last published body, branch, worktree, pinned base, and previous session reference.
+After cancellation, the next round preserves that worktree as history and creates
+a new local branch/worktree from the remote PR head (or pinned base without a PR).
+Other preparation reuses the saved worktree path rather than deriving a new path from
 the branch name. A renamed branch can therefore retain its original directory.
 Preparation, verification, and push all check the managed path, exact Git root,
-branch, and shared repository. A missing checkpoint directory blocks the task
+local branch, and shared repository. The remote publication branch stays unchanged.
+A missing checkpoint directory blocks the task
 without creating a replacement worktree.
 A follow-up creates a new main session, whereas an implementation-question reply
 or workflow recovery retains the current one. Comments received while working,
@@ -566,7 +622,8 @@ It opens background task tabs when enabled and exposes `/bot` for task managemen
 and `/restartworkflow` for operator recovery in the owner project. Commands use
 owner-scoped RPC; they are not GitHub comment commands. Activity phases `merged`
 and `pr_closed` are display values, not new persisted execution phases.
-Local task statuses `closing` and `closed` are durable and separate from PR state.
+Local statuses `closing`/`closed` end tracking; `cancelling`/`watching` skip a round
+while preserving tracking. They are durable and separate from GitHub PR state.
 Closure cleanup includes known earlier-round sessions and media helpers. Busy
 tabs wait until idle; cleanup does not delete sessions, interrupt work, or remove
 worktrees. A manually reopened tab is not repeatedly closed in the same TUI instance.
@@ -595,18 +652,20 @@ An error normally preserves the phase so retry continues from its checkpoint.
 | `ready` | Eligible for worker selection when due. |
 | `waiting` | Awaiting an issue answer; no implementation or publication while unresolved. |
 | `retry_wait` | Transient failure; automatic retry after `nextAt`. |
-| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
+| `blocked` | Explicit `Blocked` or PR-description conflict, or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
 | `failed` | Other errors reached `maxAttempts`; operator recovery/retry required unless the checkpoint also qualifies as a stopped-session recovery candidate. |
 | `done` | PR publication/reconciliation completed; feedback and merge monitoring remain possible. |
 | `closing` | Operator requested end of tracking; interrupt sessions and drain in-flight work, retaining errors for retry. |
-| `closed` | Tracking ended locally; preserve history and work, exclude discovery, runtime hooks, execution and merge monitoring. |
+| `closed` | Tracking ended locally; preserve history and work, exclude discovery, runtime hooks, execution and merge monitoring until explicit resumption. |
+| `cancelling` | Stop saved sessions and drain the selected round; retry interruption failure without publishing. |
+| `watching` | Round cancelled; no automatic execution replay. Track PR state and new feedback, merge only against a saved published head. |
 
 ```mermaid
 flowchart TD
     Work[Execute saved phase] --> Result{Result?}
     Result -->|WaitingForAnswer| Wait[waiting, or ready if answer already arrived]
     Result -->|SessionStopped| Stop[running / blocked, sessionStopped true]
-    Result -->|Other Blocked or GitHub 401, 404, 422| Block[blocked at saved phase]
+    Result -->|Other Blocked, description conflict or GitHub 401, 404, 422| Block[blocked at saved phase]
     Result -->|Other failure below attempt limit| Retry[retry_wait at saved phase]
     Retry -->|nextAt elapsed| Work
     Result -->|Other failure at limit| Fail[failed at saved phase]
@@ -645,6 +704,17 @@ flowchart TD
     Again -->|Failure| CloseError
     CloseError --> Interrupt
     Restart[Owner restart with saved closing request] --> Interrupt
+    CancelRound[Cancel current round] --> Publish{Publication or merge in flight?}
+    Publish -->|Yes| RejectClose
+    Publish -->|No| SaveCancel[Persist cancelling, block prompts, hooks and checkpoints]
+    SaveCancel --> DrainCancel[Interrupt sessions, drain worker and questions, interrupt again]
+    DrainCancel -->|Success| Watch[Archive round, clear live errors, enter watching]
+    DrainCancel -->|Failure| RetryCancel[Keep cancelling and error, retry after 30 seconds or owner restart]
+    RetryCancel --> DrainCancel
+    Watch -->|New feedback| NewRound[New round in fresh worktree, retain archived work]
+    NewRound --> Work
+    Closed -->|Resume issue tracking| Validate[Require open issue and any known PR, skip observed backlog]
+    Validate --> SaveCancel
 ```
 
 - Task backoff is `min(3600, 5 * 2^attempts)` seconds, with the incremented
@@ -696,6 +766,8 @@ service, resume a paused scheduler, or perform a scan itself.
 | Action | Saved phase and session | Effect |
 | --- | --- | --- |
 | Continue a stopped session in the TUI | Same session, `running` phase | Once successful and recognized by the probe, normal session validation, checks and publication resume automatically. |
+| `/bot` → Cancel current round, or `cancelround KEY` | Archive round and retain PR tracking | Persist cancelling, drain work, then watch new feedback. Next round uses a fresh worktree. |
+| `/bot` → Resume issue tracking, or `resumetracking KEY` | Preserve closed history and work | Validate GitHub objects, skip old backlog, stop saved sessions and watch future comments. |
 | `/bot`, select an issue, then Stop and close task | Keep phase, sessions, worktree, branch and PR | Persist closing, interrupt saved sessions and drain work, then close local tracking. No GitHub issue/PR close or deletion. |
 | `/bot`, select an issue, then Close session tabs | No checkpoint change | Close idle local tabs only, continue tracking. |
 | `/restartworkflow`, then select an issue | Same phase, session, worktree, branch and PR | Queue recovery for an eligible blocked/failed task. A stopped session may receive one continuation; verification/publication retries its saved stage. |
@@ -721,7 +793,7 @@ Regression evidence: [core.test.ts](../test/core.test.ts),
 `/bot` also exposes the saved error and task identity before any operator action.
 Closing is independent of GitHub availability, issue state, PR state, route validity
 and pending questions. The durable `closed` record prevents the same issue key
-from being rediscovered. Scans skip closing/closed records before PR, missing-issue
+from being rediscovered until explicit Resume issue tracking. Scans skip closing/closed/cancelling records before PR, missing-issue
 and comment reads; late checkpoints and errors cannot reactivate them. There is
 no automatic deletion based on an ambiguous GitHub 404 response.
 
@@ -733,7 +805,7 @@ or merge refuses closure admission. In-flight comments cannot be recalled. Error
 while stopping sessions remain visible as `closing`, retried after 30 seconds or
 from the menu. `accepted` acknowledges the request, not finished interruption.
 
-The sidebar names up to three blocked/failed/closing tasks with their saved errors,
+The sidebar names up to three blocked/failed/closing/cancelling tasks with their saved errors,
 excludes locally closed tasks from live queue counts, and shows a separate closing
 count. `/bot` retains all task records and their actions, including opening the
 saved conversation after closure. See [runtime management](runtime.md#manage-tasks-from-bot).
@@ -741,3 +813,15 @@ saved conversation after closure. See [runtime management](runtime.md#manage-tas
 While a closure is pending, the dispatcher does not start another worker pass.
 An unrelated already-running task can finish; scanning continues for other tasks.
 The monitor reports task maintenance until closure completes.
+
+
+Round cancellation uses the same interrupt/drain discipline as closure but ends
+in `watching`. It retains pending new feedback, clears the cancelled question and
+live error, and archives the stopped round. Exact permission replies for archived
+question IDs are ignored. Resume issue tracking is a separate explicit action for
+closed tasks: validate the open issue/PR, skip already-observed backlog, then
+cancel any saved execution and watch future comments. Historic errors remain in
+Show details; closed/watching sidebar snapshots do not display them as live failures.
+`controlVersion` and round ordering prevent late TUI events from reviving old work.
+See [cancellation behavior](runtime.md#cancelling-one-round-while-keeping-tracking)
+and [persistence details](advanced.md#round-cancellation-and-resuming-tracking).

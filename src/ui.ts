@@ -16,8 +16,13 @@ export function setupUI(context: Plugin.Context) {
   const receive = (raw: unknown, initial = false) => {
     if (stopped) return;
     const activity = Activity.parse(raw);
+    const previous = states.get(activity.key);
+    if ((previous?.controlVersion ?? 0) > (activity.controlVersion ?? 0)) return;
+    const newControl = (activity.controlVersion ?? 0) > (previous?.controlVersion ?? 0);
+    if (!newControl && previous?.round === activity.round && ["cancelling", "watching"].includes(previous.status) && !["cancelling", "watching", "closing", "closed"].includes(activity.status)) return;
+    if (!newControl && previous?.round === activity.round && previous.status === "watching" && activity.status === "cancelling") return;
     if ((states.get(activity.key)?.round ?? 0) > activity.round) return;
-    if (["closing", "closed"].includes(states.get(activity.key)?.status ?? "") && !["closing", "closed"].includes(activity.status)) return;
+    if (!newControl && ["closing", "closed"].includes(states.get(activity.key)?.status ?? "") && !["closing", "closed"].includes(activity.status)) return;
     if (states.get(activity.key)?.status === "closed" && activity.status === "closing") return;
     states.set(activity.key, activity);
     const known = sessions.get(activity.key) ?? new Set<string>();
@@ -99,23 +104,28 @@ export function setupUI(context: Plugin.Context) {
         }
         const activity = states.get(selected);
         if (!activity) return;
-        const terminal = ["closing", "closed"].includes(activity.status);
+        const terminal = ["closing", "closed", "cancelling", "watching"].includes(activity.status);
         const action = await context.ui.dialog.select({ title: `${selected} · ${activity.status}`, options: [
           { title: "Open session", description: "Inspect the saved conversation and work", value: "open" },
           { title: "Show details", description: "Status, error, branch, session and PR", value: "details" },
-          { title: "Close session tabs", description: "Hide idle tabs only; the bot keeps tracking this task", value: "tabs" },
+          { title: "Close session tabs", description: "Hide idle tabs only; does not change tracking", value: "tabs" },
+          ...(!["closing", "closed", "done", "watching"].includes(activity.status) ? [{ title: activity.status === "cancelling" ? "Retry cancelling round" : "Cancel current round", description: "Stop this round; preserve work and keep watching new issue comments and the PR", value: "cancelround" }] : []),
+          ...(activity.status === "closed" ? [{ title: "Resume issue tracking", description: "Watch future comments; do not replay the stopped round or the closed-period backlog", value: "resumetracking" }] : []),
           ...(!terminal ? [{ title: "Restart workflow", description: "Resume an eligible stopped task, preserving work", value: "restart" }] : []),
-          ...(activity.status !== "closed" ? [{ title: activity.status === "closing" ? "Retry closing task" : "Stop and close task", description: "Stop known bot sessions and end tracking; preserve all local work and history", value: "close" }] : []),
+          ...(!["closed", "cancelling"].includes(activity.status) ? [{ title: activity.status === "closing" ? "Retry closing task" : "Stop and close task", description: "Stop known bot sessions and end tracking; preserve all local work and history", value: "close" }] : []),
         ] });
         if (!action || stopped) return;
         try {
           if (action === "details") {
             await context.ui.dialog.alert({ title: selected, message: [
               `Status: ${activity.status} · phase: ${activity.phase} · round: ${activity.round}`,
-              `Error: ${activity.error ?? "none"}`, `Session: ${activity.sessionID ?? "not created"}`,
+              `Error: ${activity.error ?? "none"}`, ...(activity.historicalError ? [`Historical error: ${activity.historicalError}`] : []), `Session: ${activity.sessionID ?? "not created"}`,
               `Branch: ${activity.branch ?? "unknown"}`, `Worktree: ${activity.worktree ?? "not created"}`,
               `PR: ${activity.prURL ?? "none"}`, `Queued feedback: ${activity.pendingFeedback ?? 0}`,
               ...(activity.status === "closed" ? ["Tracking ended locally. GitHub issue/PR and local work were preserved."] : []),
+              ...(activity.cancelledRound ? [`Cancelled round: ${activity.cancelledRound}. Its worktree and session remain preserved.`] : []),
+              ...(activity.cancelledWorktree ? [`Preserved cancelled worktree: ${activity.cancelledWorktree}`] : []),
+              ...(activity.localBranch ? [`Local branch: ${activity.localBranch}`] : []),
             ].join("\n") });
           } else if (action === "tabs") {
             const ids = sessions.get(selected) ?? new Set<string>();
@@ -124,7 +134,20 @@ export function setupUI(context: Plugin.Context) {
               if (!ids.has(tab.sessionID)) continue;
               if (tab.busy || !context.ui.tabs.close(tab.sessionID)) busy++;
             }
-            context.ui.toast.show({ message: busy ? "Busy tabs remain open. Use Stop and close task to stop execution." : "Session tabs closed. Task tracking is unchanged.", variant: "info" });
+            context.ui.toast.show({ message: busy ? "Busy tabs remain open. Use Cancel current round to stop work while keeping issue tracking." : "Session tabs closed. Task tracking is unchanged.", variant: "info" });
+          } else if (action === "cancelround" || action === "resumetracking") {
+            const resume = action === "resumetracking";
+            const confirmed = await context.ui.dialog.select({ title: resume ? `Resume tracking ${selected}?` : `Cancel current round for ${selected}?`, options: [
+              { title: "Back", description: "Leave the task unchanged", value: "back" },
+              { title: resume ? "Resume issue tracking" : "Cancel round and keep tracking", description: resume
+                ? "Keep all work. Watch future comments only; skip the stopped round and comments posted while closed."
+                : "Stop sessions and skip this round without publishing. Preserve its worktree; later rounds start from the published PR or base. Already queued new feedback remains eligible.", value: "confirm" },
+            ] });
+            if (confirmed !== "confirm" || stopped) return;
+            const request = { location, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]) };
+            const result = resume ? await rpc.resumetracking({ key: selected }, request) : await rpc.cancelround({ key: selected }, request);
+            context.ui.toast.show({ message: result.accepted ? `${selected}: stopping the round, then watching for new comments.` : `${selected}: no round to cancel or tracking is already active.`, variant: "info", duration: 8000 });
+            await sync(true);
           } else if (action === "close") {
             const confirmed = await context.ui.dialog.select({ title: `Stop and close ${selected}?`, options: [
               { title: "Cancel", description: "Leave this task unchanged", value: "cancel" },
@@ -140,7 +163,7 @@ export function setupUI(context: Plugin.Context) {
             await sync(true);
           } else if (action === "open") {
             if (!activity.sessionReady || !activity.sessionID) {
-              await context.ui.dialog.alert({ title: selected, message: "The session has not started yet. Use Stop and close task to end tracking." }); return;
+              await context.ui.dialog.alert({ title: selected, message: "The session has not started yet. Use Cancel current round to skip this round, or Stop and close task to end tracking." }); return;
             }
             await context.data.session.sync(activity.sessionID);
             if (!context.ui.tabs.focus(activity.sessionID)) context.ui.router.navigate({ type: "session", sessionID: activity.sessionID });

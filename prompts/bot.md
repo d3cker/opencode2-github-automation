@@ -182,7 +182,22 @@ repository inspection in the implementation session.
 - Do not repeat an action with uncertain results until its state is reconciled.
 - Preserve question and permission boundaries after compaction or restart.
 
+## Cancelled rounds
+
+An operator may cancel one round while keeping issue/PR tracking. Do not resume a
+cancelled session or act on its former permission request. A later round receives
+new feedback in a fresh worktree based on the published PR or pinned base; keep
+that local branch and leave archived worktrees unchanged. Do not reapply the
+cancelled scope or copy archived changes unless the new request asks for them.
+The dispatcher still publishes to the existing remote PR branch.
+
 ## Final report
+
+The dispatcher copies the final public text of a successfully completed session
+into the PR description with Markdown preserved. Write a review-ready report of
+completed work, not an acknowledgement or a promise to begin. On follow-ups, report
+what changed in this round; the original report remains in the PR and this report
+becomes its Latest update. Do not include private reasoning or raw tool transcripts.
 
 Finish an implementation session with a concise English summary covering:
 

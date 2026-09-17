@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mergeDescription, assertDescriptionSize, DescriptionConflict } from "./pr-description.js";
 import { Review, DatedComment, approvalAuthors } from "./approval.js";
 import type { GithubOptions } from "./config.js";
 
@@ -64,7 +65,25 @@ export class Github {
     return Pull.parse(await this.request(`/repos/${repo}/pulls/${number}`));
   }
   async ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull> {
-    return await this.findPull(repo, branch) ?? Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body: await this.signed(body) }));
+    const found = await this.findPull(repo, branch);
+    if (found) return found;
+    const signed = await this.signed(body); assertDescriptionSize(signed);
+    return Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body: signed }));
+  }
+  async updatePullBody(repo: string, number: number, commit: string, key: string, body: string, previous?: string, legacy?: string) {
+    const schema = z.object({ state: z.string(), head: z.object({ sha: z.string() }), body: z.string().nullable() });
+    const read = async () => schema.parse(await this.request(`/repos/${repo}/pulls/${number}`));
+    const current = await read();
+    if (current.state !== "open" || current.head.sha !== commit) throw new DescriptionConflict("PR is closed or its head differs from the verified commit. Inspect it before retrying publication.");
+    const signedLegacy = legacy === undefined ? undefined : await this.signed(legacy);
+    let next = mergeDescription(current.body ?? "", key, body, previous, signedLegacy);
+    // Sign a new body or an exact legacy replacement; retain existing signatures elsewhere.
+    if (!(current.body ?? "").includes(body) && (!current.body || current.body === signedLegacy)) next = await this.signed(next);
+    assertDescriptionSize(next);
+    if (next === current.body) return;
+    const fresh = await read();
+    if (fresh.state !== "open" || fresh.head.sha !== commit || fresh.body !== current.body) throw new DescriptionConflict("PR changed while its description was being prepared. Retry after inspecting concurrent edits.");
+    await this.request(`/repos/${repo}/pulls/${number}`, "PATCH", { body: next });
   }
   async mergeApproved(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean> {
     const detail = z.object({ state: z.string(), merged: z.boolean(), draft: z.boolean(), head: z.object({ sha: z.string() }), mergeable: z.boolean().nullable(), mergeable_state: z.string() });

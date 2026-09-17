@@ -261,13 +261,19 @@ installations are not removed by `npm uninstall --global`.
   unavailable or stale readings are marked explicitly. See
   [runtime panel details](docs/runtime.md#runtime-status-sidebar).
 - **Task management:** `/bot` lets you open a session, inspect details, close idle
-  tabs, restart a stopped workflow, or stop sessions and end task tracking. Closing
+  tabs, restart a stopped workflow, **Cancel current round** while keeping issue
+  tracking, or stop sessions and end task tracking. **Resume issue tracking**
+  restores a closed task for future comments without replaying its old round. Closing
   tracking preserves all local work and history, works without a surviving GitHub
   issue/PR, and prevents rediscovery. See [task management](docs/runtime.md#manage-tasks-from-bot).
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work
   on an open PR without another mention, after the current round publishes.
+- **PR descriptions:** the successful session's final summary appears in the PR,
+  with dispatcher checks listed separately. Follow-ups keep the original report
+  and replace **Latest update**. Keep manual notes outside the managed HTML markers.
+  See [PR descriptions](docs/runtime.md#pr-descriptions).
 - **Recovery:** completing a stopped bot session manually is detected by the
   dispatcher, which verifies and publishes before processing queued comments.
   Use `/restartworkflow` in the owner project's TUI or
