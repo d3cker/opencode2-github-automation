@@ -44,7 +44,7 @@ export const Task = z.object({
   source: z.enum(["issue", "comment"]).optional(),
   feedback: z.array(Comment).optional(), pendingFeedback: z.array(Comment).optional(), commentCursor: z.number().optional(),
   previousSessionID: z.string().optional(),
-  checks: z.array(z.string()).optional(), commit: z.string().optional(),
+  checks: z.array(z.string()).optional(), commit: z.string().optional(), pushedCommit: z.string().optional(),
   publishedAt: z.number().optional(), merged: z.boolean().optional(), mergeError: z.string().optional(), mergeNextAt: z.number().optional(),
   completion: CompletionSummary.optional(), initialCompletion: CompletionSummary.optional(),
   publishedBody: z.string().optional(),
@@ -268,7 +268,7 @@ export class Dispatcher {
       } : {}), round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
         phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
         analysisDecision: undefined, analysisDialogue: undefined, question: undefined,
-        sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, completion: undefined, checks: undefined, commit: undefined, error: undefined });
+        sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, completion: undefined, checks: undefined, commit: undefined, pushedCommit: undefined, error: undefined });
       await this.store.save(this.queue);
     });
     const resumable = this.queue.tasks.filter(t => ["ready", "retry_wait"].includes(t.status));
@@ -355,11 +355,16 @@ export class Dispatcher {
         const body = renderDescription(task.key, task.issue.number, task.initialCompletion!, task.completion!);
         let pr = await this.github.findPull(task.repo, task.branch);
         if (followup && (!pr || pr.state !== "open")) throw new Blocked("The original PR is no longer open; changes remain in the worktree");
-        if (followup && pr) await this.executor.push(task, repo);
+        const push = async (repository: Repository) => {
+          if (task.pushedCommit === task.commit) return;
+          await this.executor.push(task, repository);
+          await this.update(task, { pushedCommit: task.commit });
+        };
+        if (followup && pr) await push(repo);
         if (!pr) {
           if (!task.prTitle) await this.update(task, { prTitle: await this.executor.title(task) });
           if ((await this.github.issue(task.repo, task.issue.number)).state !== "open") throw new Blocked("Issue closed before PR publication");
-          await this.executor.push(task, repo);
+          await push(repo);
           pr = await this.github.ensurePull(task.repo, task.branch, repo.baseBranch, task.prTitle!, body);
         }
         if (pr.state === "open") {

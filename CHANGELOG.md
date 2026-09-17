@@ -18,6 +18,11 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Retry PR head propagation after a successful push when the remote branch still
+  matches the verified commit. Preserve a durable push checkpoint across restarts,
+  avoid repeating acknowledged pushes, and distinguish closed PRs from changed
+  branches while preserving manual description edits.
+
 - Keep repository inventory RPC responses valid JSON when an owner has no runtime
   snapshots. Isolate setup-test registries so validation never adds fixture
   repositories to the operator's inventory.

@@ -8,7 +8,7 @@ import { GithubOptions, Job, matchRoute } from "../src/config.js";
 import { Scheduler } from "../src/scheduler.js";
 import { Dispatcher, Blocked, Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
 import { JsonStore, acquire, type Store } from "../src/state.js";
-import { Github, GithubError, type Issue, type Comment } from "../src/github.js";
+import { Github, GithubError, PullHeadPending, type Issue, type Comment } from "../src/github.js";
 import type { Plugin } from "@opencode/plugin";
 import { OpenCodeExecutor } from "../src/executor.js";
 
@@ -906,6 +906,39 @@ test("completion is persisted before verification, bound to its commit and reuse
   f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
   assert.equal(summaries, 1); assert.equal(restarted.status()[0]?.status, "done");
   assert.equal(restarted.status()[0]?.publishedBody, body);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
+
+test("publication retries a lagging PR after owner restart without rerunning work or pushing again", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.github.comments = async () => [{ id: 43, body: "Fix the tests", user: { login: "alice" } }];
+  let updates = 0;
+  f.github.updatePullBody = async () => { if (++updates === 1) throw new PullHeadPending("GitHub PR still reports the previous commit"); };
+  f.executor.verify = async () => { f.events.push("verify"); return { checks: ["passed"], commit: "round-two" }; };
+  await d.scan(); await d.tick();
+  const saved = d.status()[0]!;
+  assert.equal(saved.status, "retry_wait"); assert.equal(saved.phase, "publishing");
+  assert.equal(saved.pushedCommit, "round-two"); assert.equal(saved.completion?.commit, "round-two");
+  assert.equal(saved.publishedHead?.commit, "sha");
+  const events = [...f.events];
+  // Exercise the durable schema, not just the in-memory task object.
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
+  assert.equal(restarted.status()[0]?.status, "done"); assert.equal(restarted.status()[0]?.publishedHead?.commit, "round-two");
+  assert.equal(updates, 2); assert.deepEqual(f.events, events);
+});
+
+test("PR propagation retries stop at the configured attempt limit while retaining the pushed commit", async () => {
+  const f = fixture(), d = f.make();
+  f.github.updatePullBody = async () => { throw new PullHeadPending("GitHub PR has not caught up"); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  for (let attempt = 1; attempt < options.maxAttempts; attempt++) { f.advance(); await d.tick(); }
+  const saved = d.status()[0]!;
+  assert.equal(saved.status, "failed"); assert.equal(saved.phase, "publishing");
+  assert.equal(saved.attempts, options.maxAttempts); assert.equal(saved.pushedCommit, "sha");
+  assert.equal(f.events.filter(e => e === "push").length, 1);
   assert.equal(f.events.filter(e => e === "run").length, 1);
 });
 
