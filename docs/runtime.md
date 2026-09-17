@@ -431,6 +431,12 @@ durable as before.
 
 ## PR descriptions
 
+A formal GitHub **Approve** review applies to its exact commit even when submitted
+before the bot finishes updating the PR description. Retrying publication does
+not invalidate that review. A new commit needs a matching review, and dismissed
+approvals or outstanding change requests are not accepted. Plain merge comments
+still must follow the latest publication because they do not identify a commit.
+
 After pushing a verified commit, GitHub may briefly show the previous commit in
 the PR. If the remote branch already matches the verified commit, the bot waits
 and automatically retries publication within its configured attempt limit. It

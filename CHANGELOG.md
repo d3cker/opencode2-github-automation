@@ -18,6 +18,10 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Honor formal approvals for the exact verified PR commit even when publication
+  or description recovery finishes later. Retain review revocation, authorization,
+  and merge-readiness checks; keep timestamp gating for unbound merge comments.
+
 - Retry PR head propagation after a successful push when the remote branch still
   matches the verified commit. Preserve a durable push checkpoint across restarts,
   avoid repeating acknowledged pushes, and distinguish closed PRs from changed

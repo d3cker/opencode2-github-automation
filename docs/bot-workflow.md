@@ -557,7 +557,7 @@ flowchart TD
     Idle[Worker has no eligible execution task] --> Eligible{Auto-merge enabled and done or watching task with published head eligible?}
     Eligible -->|No| Later[Wait for a later worker pass]
     Eligible -->|Yes| Since{publishedAt exists?}
-    Since -->|No| Window[Record current time as fresh approval window]
+    Since -->|No| Window[Record current time as fresh merge-comment window]
     Window --> Later
     Since -->|Yes| Scan[Scan again before considering merge]
     Scan --> Fresh{Pending feedback or closed PR?}
@@ -567,7 +567,7 @@ flowchart TD
     Already -->|Yes| Ack[Post or reconcile signed merge acknowledgement, persist merged and closed PR]
     Already -->|No| Head{Open, non-draft PR with saved published head?}
     Head -->|No| Poll[Clear mergeError, set mergeNextAt at least 60 seconds later]
-    Head -->|Yes| Review[Evaluate latest decisive reviews and exact approval comments]
+    Head -->|Yes| Review[Match latest decisive reviews to exact SHA, match merge comments after publication]
     Review --> Author{No outstanding changes request and eligible approver has write, maintain or admin access?}
     Author -->|No| Poll
     Author -->|Yes| Ready{mergeable and mergeable_state clean?}
@@ -602,23 +602,27 @@ flowchart TD
 Merge eligibility requires `done`, or `watching` with a saved `publishedHead`,
 a tracked nonclosed PR, a saved published commit, no
 merged flag, no pending feedback, and an elapsed `mergeNextAt`. Missing
-`publishedAt` in an older queue starts a fresh approval window rather than using
-historical approval. Merge checks run when the worker has no execution task to
+`publishedAt` in an older queue starts a fresh window for merge comments, which
+have no commit binding. Formal reviews still require the exact verified SHA.
+Merge checks run when the worker has no execution task to
 advance, rather than immediately after every publication.
 
 For each reviewer, the latest `APPROVED`, `CHANGES_REQUESTED`, or `DISMISSED`
 review is decisive. Any outstanding changes request suppresses all approval
 candidates, including comment approvals. An approval review must reference the
-current verified SHA and have been submitted after `publishedAt`. An approval
-comment must have been created after that time and match a configured phrase
+current verified SHA and have a valid submission timestamp; it may precede
+`publishedAt`. Finishing or retrying a PR description update does not invalidate
+approval of unchanged code. An approval comment must have been created after
+`publishedAt` and match a configured phrase
 as a whole message after case, whitespace, and trailing `.`/`!` normalization.
 Bot comments and marked automation comments are excluded. Default phrases are
 `/merge`, `lgtm, merge`, and `approved, merge`; default merge method is `squash`.
 The permission check then requires an allowlisted candidate with repository write,
 maintain, or admin access. GitHub still enforces merge requirements.
 
-Every successful round updates `publishedAt`, so old approvals cannot authorize
-the next published round. When the approval method returns false (for example,
+Every successful round updates `publishedAt`, so old merge comments cannot
+authorize the next published round. Formal reviews remain valid for the same
+commit only; a different published SHA requires a matching review. When the approval method returns false (for example,
 no eligible approval or a mismatched head), the dispatcher clears `mergeError` and schedules another check
 after 60 seconds. An approved PR that GitHub says is not ready, a rejected merge,
 or a request failure records `mergeError`; error retries also respect GitHub timing.

@@ -45,6 +45,8 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
    preserve manual notes outside the managed description.
 7. Merge only after eligible approval of the published head, repository permission
    checks, and GitHub merge readiness checks. Post a signed acknowledgement.
+   Formal reviews are bound to the exact commit and survive later description
+   recovery; unbound merge comments must follow the latest publication.
 
 A failure retains the current phase and retry state. An eligible `running` task
 with a saved session takes priority over other ready tasks. Unknown prompt

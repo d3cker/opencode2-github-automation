@@ -156,8 +156,12 @@ verified head SHA; a changed branch cannot be merged using an older approval.
 The bot does not request a protection bypass. Configure required checks and review
 rules on GitHub for your repository's policy.
 
-Approvals must be newer than the bot's latest publication. On upgrade, old tasks
-start watching for new approvals; historical approvals do not cause a merge.
+Formal **Approve** reviews must reference the exact published commit and remain
+the reviewer's latest decisive review. They can precede completion of publication:
+retrying a description update does not invalidate approval of unchanged code.
+Merge comments have no commit binding, so they must be newer than the bot's latest
+publication. Old tasks without a publication timestamp start a fresh comment
+window on upgrade; existing reviews still require the exact verified commit.
 Pending issue feedback is processed before attempting a merge. Merge failures
 are retried at intervals of at least 60 seconds and appear as `mergeError` in
 `status` and in `/bot`. Successful merges receive a signed PR comment.
