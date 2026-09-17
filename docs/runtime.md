@@ -188,11 +188,13 @@ during execution, a pending question, or a blocked stage remain queued. Receivin
 one does not itself clear the current block. A mention in an authorized comment
 can also start work on an untracked issue.
 
-Follow-up rounds reuse the worktree path saved in the queue, even if recovery
+Normal follow-up rounds reuse the worktree path saved in the queue, even if recovery
 renamed its branch. Preparation, verification, and push validate that path as a
 worktree root directly inside the managed worktree directory, attached to the
 expected branch and repository. If the saved directory is missing, restore it
 before retrying; the bot does not create a replacement or discard existing work.
+After explicit round cancellation, a new round deliberately uses a fresh worktree
+while preserving the old one; see [cancelling rounds](#cancelling-one-round-while-keeping-tracking).
 
 Edits to existing comments and PR review comments are not supported. Closing the
 issue or closing/merging the PR blocks further rounds.
@@ -242,7 +244,7 @@ configured repository, sharing the owner's scheduler information.
 
 The report includes dispatcher activity, last scan attempt completion (which can
 include failure), scheduler next-run timestamps, task counts and every open
-blocked/failed/closing issue key and saved error. Active counts use the actual
+blocked/failed/closing/cancelling issue key and saved error. Active counts use the actual
 active task; scheduled work is separate. Closed local tracking and closed/merged
 PR history do not inflate counts. A working dispatcher can have blocked tasks;
 inspect the task counts as well as the owner status.
@@ -297,6 +299,14 @@ The same picker also offers **Repositories** for the host inventory:
 - **Close session tabs**: hide that task's idle tabs in this TUI only. Busy tabs
   remain open. Tracking and execution continue.
 - **Restart workflow**: request the same guarded recovery as `/restartworkflow`.
+- **Cancel current round**: stop the current round without publishing it. Preserve
+  its session and worktree, then enter `watching` for new issue comments and PR
+  state. Existing queued feedback remains eligible; only the current round is
+  cancelled. **Retry cancelling round** retries an interruption failure.
+- **Resume issue tracking**: available for a locally closed task. Validate that
+  the issue and any known PR are open, stop any saved sessions again, then watch
+  future comments. The stopped round and comments already present at this action's
+  GitHub read are skipped. It does not replay work or immediately publish.
 - **Stop and close task**: after confirmation, persist `closing`, interrupt known
   main, earlier-round and media sessions, wait for idleness and the task's in-flight
   worker operation, then persist `closed`. The menu offers **Retry closing task**
@@ -310,8 +320,8 @@ unfinished work. `closed` here means **local tracking ended**, not PR closure.
 Closed tasks remain listed as history and their conversations can be reopened.
 
 The closed record prevents rediscovery and later comments from restarting the
-same issue. Recovery/retry cannot reopen tracking; create a new issue for new
-bot work. Runtime question/helper admission is disabled once closure is requested.
+same issue. Recovery/retry cannot reopen tracking; use **Resume issue tracking**
+explicitly to watch that issue again. Runtime question/helper admission is disabled once closure is requested.
 Related idle tabs close once when the task becomes `closed`.
 
 An already-started publication or automatic merge rejects closure with an explicit
@@ -325,6 +335,47 @@ Interruption errors keep the task in `closing` with a visible error, retried aft
 instead of restarting implementation. No success is reported while interruption
 has failed or the task's worker operation is still pending. Missing sessions are
 already stopped and do not block closure.
+
+## Cancelling one round while keeping tracking
+
+**Cancel current round** differs from closing the task and from hiding its tab.
+It persists `cancelling` before interrupting sessions, waits for in-flight local
+work and question posts, interrupts again, and enters `watching` only after that
+finishes. Failures remain visible and retry after 30 seconds; an owner restart
+resumes cancellation. Publication or merge already in flight rejects cancellation
+because remote effects cannot be rolled back. A comment already being posted can
+still appear in GitHub. Cancellation does not revert previously pushed commits.
+
+The completed transition archives the round's session, worktree, question,
+feedback, error, attempts and verification/report checkpoints. It clears the
+current question, recovery request and live error, without deleting any files or
+sessions. Late explicit `/allow ID` or `/deny ID` replies to archived permission
+questions cannot restart the task. Other new authorized comments can request work.
+
+The next round starts in a **new worktree and local branch** from the published
+PR branch, or the pinned base when no PR exists. Archived worktrees remain intact,
+including dirty files and local commits; their changes are not automatically
+included. Publication still targets the original remote branch and PR. The bot
+receives only the new round's feedback and instructions not to replay cancelled
+scope. Normal later rounds reuse the new worktree. Details show the last preserved
+worktree; full cancellation history is retained in the queue.
+
+PR state monitoring continues while `watching`. Automatic merging uses only the
+last saved published head, with normal approval checks. Legacy tasks without that
+checkpoint still watch comments and PR state, but cannot auto-merge until another
+round publishes successfully. No model runs while waiting for new feedback.
+
+Equivalent owner-checkout commands:
+
+```sh
+opencode2-automation cancelround 'owner/repository#123'
+opencode2-automation resumetracking 'owner/repository#123'
+```
+
+The sidebar shows **Watching issue — round cancelled** or **Tracking closed**.
+Old failures appear under **Historical error** in `/bot` → **Show details**, not
+as a live red error or failed-attempt count. Cancelling a round does not automatically
+close the PR's tab; closing the tab remains an independent display action.
 
 ## Runtime status sidebar
 
@@ -342,7 +393,7 @@ The panel shows:
   Pausing polling can coexist with an already-running scan or task.
 - Queue counts: ready/retry-wait excluding the active task, waiting for replies, blocked/failed and published
   tasks, excluding closed/merged PRs and locally closed tracking. Scheduled does not mean a model is executing.
-  Up to three attention rows identify blocked, failed or closing issue keys and
+  Up to three attention rows identify blocked, failed, closing or cancelling issue keys and
   saved errors. Pending closures have a separate count; use `/bot` for the full list.
 - Task details: issue, phase, round, observed main-session status, task/base branches,
   model, queued feedback, allocated media helper count for the current session,

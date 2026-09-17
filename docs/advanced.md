@@ -264,3 +264,38 @@ notice; full saved text remains in task state and the session. Dispatcher check
 text is limited to 8,000 bytes. The complete description, including retained
 notes and signature, must fit within the automation limit of 60,000 bytes or
 publication blocks without dropping notes. Titles are not regenerated on updates.
+
+
+## Round cancellation and resuming tracking
+
+Owner RPC methods `automation.github.cancelround` and
+`automation.github.resumetracking` accept `{ "key": "owner/repository#123" }`
+and return `{ "accepted": true }` when cancellation is queued. A no-op returns
+`false`; invalid transitions and publication/merge in flight throw an actionable
+error. Matching CLI commands work from the configured owner checkout. See
+[runtime semantics](runtime.md#cancelling-one-round-while-keeping-tracking).
+
+Durable `cancellation` stores the request time and interruption error. Status
+`cancelling` gates worker checkpoints, session prompts, runtime hooks, discovery
+updates and publication; scans leave its cursor unchanged. A worker pass resumes
+due cancellation after restart and retries failed interruption after 30 seconds.
+It drains the selected worker and pending question posts before entering `watching`.
+The queue keeps `cancelledRounds` with prior errors, questions, feedback, worktree,
+session and verification/report snapshots. `controlVersion` increases on operator
+transitions, so stale TUI events cannot undo explicit resumption.
+
+Watching continues PR-state discovery and accepts new authorized issue comments.
+`publishedHead` retains the successfully published SHA and approval-window time
+across rounds; merge checks use it while watching. No saved published head means
+no automatic merge until the next successful publication. Old round checkpoints
+are not treated as a new successful publication. Explicit resumption validates
+GitHub objects and advances the comment cursor to the observed backlog without
+queuing it; failed validation leaves tracking closed.
+
+The next round allocates `localBranch` and a new managed worktree, fetching the
+existing remote PR head if applicable. The prior worktree and branch are never
+reset, cleaned, deleted or force-pushed. Checks validate the new local branch;
+push still targets the task's original remote `branch`. Normal publication and
+verification guards apply, including ancestry of the pinned base. The archived
+round is not replayed or published automatically. Existing queued feedback is
+retained by cancellation, while resuming a closed task explicitly skips backlog.

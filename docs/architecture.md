@@ -37,6 +37,8 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
    if creating a PR without an already-saved title.
 6. After publication, process queued authorized issue comments as new rounds on
    the same worktree and branch, with a new main session and the existing open PR.
+   After cancellation, use a fresh local branch/worktree from the published head,
+   preserving the abandoned worktree and the remote PR branch.
    Keep the original PR report and update its Latest update section after pushing;
    preserve manual notes outside the managed description.
 7. Merge only after eligible approval of the published head, repository permission
@@ -87,3 +89,12 @@ Operator task closure is a durable dispatcher operation: `/bot` sends the owner
 hooks, feedback execution and merge monitoring exclude them. Session/worktree
 data is retained. See [task management](runtime.md#manage-tasks-from-bot) for
 in-flight operation limits and the distinction from closing a TUI tab.
+
+
+Round cancellation uses `automation.github.cancelround`: persist `cancelling`,
+drain execution, archive the current round, then `watching`. Discovery continues
+and future feedback starts a new session in an isolated worktree. Only a saved
+published head can authorize auto-merge while watching. Explicit
+`automation.github.resumetracking` restores a closed task for future comments,
+skipping its abandoned round and closed-period backlog after validating GitHub
+objects. Both operations preserve work; neither closes the GitHub PR or issue.

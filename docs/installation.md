@@ -117,6 +117,12 @@ Use a separate test repository when testing on another machine. Independent
 machines do not share queue ownership and can duplicate work on the same issues.
 This installation procedure does not migrate sessions, queues, or worktrees.
 
+Back up shared automation state before an upgrade. Once round cancellation has
+saved `cancelling` or `watching`, an older plugin that does not recognize those
+statuses cannot read that queue. Do not downgrade against live newer state or
+delete it to bypass validation; keep the newer plugin or restore a coordinated
+backup while owners are stopped.
+
 Restart the service only when work is idle. Then activate every configured owner
 again as shown in the README. Reopen TUI clients after UI updates to register new
 commands and action menus such as `/bot` task closure and `/restartworkflow`; merely reopening an old task tab does not

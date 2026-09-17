@@ -150,6 +150,27 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     await assert.rejects(git.prepare({ ...task(), worktree: undefined, branch: "automation/missing-base" }, { ...repo, baseBranch: "missing" }), /Could not fetch base branch missing/);
     await writeFile(join(t.worktree!, "counter.txt"), "changed after verification\n");
     await assert.rejects(git.push(t, repo), /changed after verification/);
+    // Cancelling must preserve tracked/untracked drafts in the old worktree,
+    // while the next local branch starts from the remote PR head.
+    await writeFile(join(t.worktree!, "cancelled-draft.txt"), "keep this private draft\n");
+    await writeFile(join(t.worktree!, "local-only.txt"), "unpublished cancelled commit\n");
+    await run(t.worktree!, ["git", "add", "local-only.txt"]);
+    await run(t.worktree!, ["git", "commit", "-m", "Cancelled local work"]);
+    const cancelledHead = await run(t.worktree!, ["git", "rev-parse", "HEAD"]);
+    const next: Task = { ...t, round: 3, worktree: undefined, localBranch: "automation/resume-test-r3", pr: { number: 2, state: "open", html_url: "https://github.com/owner/repo/pull/2" } };
+    Object.assign(next, await git.prepare(next, repo));
+    assert.notEqual(next.worktree, t.worktree);
+    assert.equal(await readFile(join(next.worktree!, "counter.txt"), "utf8"), "fixed\n");
+    await assert.rejects(readFile(join(next.worktree!, "cancelled-draft.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(join(next.worktree!, "local-only.txt")), { code: "ENOENT" });
+    assert.equal(await run(t.worktree!, ["git", "rev-parse", "HEAD"]), cancelledHead);
+    assert.equal(await readFile(join(t.worktree!, "cancelled-draft.txt"), "utf8"), "keep this private draft\n");
+    await writeFile(join(next.worktree!, "new-scope.txt"), "only the new round\n");
+    Object.assign(next, await git.verify(next, repo)); await git.push(next, repo);
+    assert.equal(await run(dir, ["git", "--git-dir", remote, "rev-parse", "refs/heads/recovered-feature"]), next.commit);
+    assert.equal(await readFile(join(t.worktree!, "counter.txt"), "utf8"), "changed after verification\n");
+    assert.equal((await git.prepare(next, repo)).worktree, next.worktree);
+
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

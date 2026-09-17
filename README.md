@@ -261,7 +261,9 @@ installations are not removed by `npm uninstall --global`.
   unavailable or stale readings are marked explicitly. See
   [runtime panel details](docs/runtime.md#runtime-status-sidebar).
 - **Task management:** `/bot` lets you open a session, inspect details, close idle
-  tabs, restart a stopped workflow, or stop sessions and end task tracking. Closing
+  tabs, restart a stopped workflow, **Cancel current round** while keeping issue
+  tracking, or stop sessions and end task tracking. **Resume issue tracking**
+  restores a closed task for future comments without replaying its old round. Closing
   tracking preserves all local work and history, works without a surviving GitHub
   issue/PR, and prevents rediscovery. See [task management](docs/runtime.md#manage-tasks-from-bot).
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and

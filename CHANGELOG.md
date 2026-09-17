@@ -29,6 +29,12 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Added
 
+- Cancel a single bot round while retaining issue/PR tracking, with durable stop
+  recovery, preserved draft worktrees and fresh worktrees for later feedback.
+  Resume tracking a locally closed task without replaying its abandoned round
+  or old comments. Expose both actions in `/bot` and the CLI; show historical
+  errors only in details after closing or cancelling.
+
 - List configured repositories across the host with `opencode2-automation list`
   (`--json` for scripts) and `/bot` → **Repositories**. Show owner/checkout paths,
   base branches, timestamped dispatcher/scheduler status and concrete issue

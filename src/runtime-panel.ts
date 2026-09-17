@@ -59,7 +59,7 @@ export function selectedTask(snapshot: RuntimeSnapshot, sessionID?: string): Act
   const tasks = snapshot.dispatcher?.tasks ?? [];
   return tasks.find(t => sessionID && (t.sessionID === sessionID || t.sessionIDs?.includes(sessionID)))
     ?? tasks.find(t => t.key === snapshot.dispatcher?.activeTask)
-    ?? tasks.find(t => ["closing", "waiting", "blocked", "failed"].includes(t.status) && t.prState !== "closed")
+    ?? tasks.find(t => ["closing", "cancelling", "waiting", "blocked", "failed"].includes(t.status) && t.prState !== "closed")
     ?? tasks.find(t => ["ready", "retry_wait"].includes(t.status))
     ?? tasks.filter(t => t.status !== "closed").at(-1);
 }
@@ -76,11 +76,12 @@ export function runtimeLines(snapshot: RuntimeSnapshot, now: number, sessionID?:
     if (d.activeTask) lines.push({ text: safe(d.activeTask, 65), tone: "muted" });
     lines.push({ text: `${stale ? "Last scan" : "Discovery"}: ${d.scanning ? "scanning GitHub" : ago(d.lastScanFinished, now)}`, tone: d.scanError ? "warning" : "muted" });
     if (d.scanError) lines.push({ text: safe(d.scanError), tone: "error" });
-    const open = d.tasks.filter(t => t.status !== "closed" && (t.status === "closing" || t.prState !== "closed" && t.phase !== "merged"));
+    const open = d.tasks.filter(t => t.status !== "closed" && (["closing", "cancelling"].includes(t.status) || t.prState !== "closed" && t.phase !== "merged"));
     const count = (states: string[]) => open.filter(t => states.includes(t.status)).length;
     const scheduled = open.filter(t => ["ready", "retry_wait"].includes(t.status) && t.key !== d.activeTask).length;
     lines.push({ text: `Queue: ${scheduled} scheduled · ${count(["waiting"])} waiting`, tone: "muted" });
-    for (const task of open.filter(t => ["blocked", "failed", "closing"].includes(t.status)).slice(0, 3)) lines.push({ text: `${safe(task.key, 55)}: ${task.status} · ${safe(task.error ?? "Stopping sessions", 90)}`, tone: "warning" });
+    for (const task of open.filter(t => ["blocked", "failed", "closing", "cancelling"].includes(t.status)).slice(0, 3)) lines.push({ text: `${safe(task.key, 55)}: ${task.status} · ${safe(task.error ?? "Stopping sessions", 90)}`, tone: "warning" });
+    if (count(["watching"])) lines.push({ text: `${count(["watching"])} watching · waiting for new comments`, tone: "muted" });
     if (count(["closing"])) lines.push({ text: `${count(["closing"])} closing · /bot to manage`, tone: "warning" });
     lines.push({ text: `${count(["blocked", "failed"])} blocked/failed · ${count(["done"])} published`, tone: count(["blocked", "failed"]) ? "warning" : "muted" });
   }
@@ -98,17 +99,18 @@ export function runtimeLines(snapshot: RuntimeSnapshot, now: number, sessionID?:
   const task = selectedTask(snapshot, sessionID);
   if (task) {
     lines.push({ text: stale ? "LAST TASK SNAPSHOT" : "TASK", tone: "heading" }, { text: safe(task.key, 65) });
-    lines.push({ text: `${phaseNames[task.phase] ?? safe(task.phase)} · round ${task.round}`, tone: "muted" });
-    const status = task.status === "waiting" ? `Waiting for ${task.question === "permission" ? "permission" : "issue reply"}` : task.status === "retry_wait" ? `Retry ${due(task.nextAt ?? now, now)}` : task.status === "ready" ? d?.activeTask === task.key ? task.phase === "running" ? `Session: ${sessionStatus ?? "not observed"}` : "In progress" : "Scheduled" : task.status;
+    lines.push({ text: `${["closed", "watching"].includes(task.status) ? "Last round" : phaseNames[task.phase] ?? safe(task.phase)} · round ${task.round}`, tone: "muted" });
+    const status = task.status === "waiting" ? `Waiting for ${task.question === "permission" ? "permission" : "issue reply"}` : task.status === "retry_wait" ? `Retry ${due(task.nextAt ?? now, now)}` : task.status === "ready" ? d?.activeTask === task.key ? task.phase === "running" ? `Session: ${sessionStatus ?? "not observed"}` : "In progress" : "Scheduled" : ({ closed: "Tracking closed", watching: "Watching issue — round cancelled", cancelling: "Cancelling round — tracking will continue" }[task.status] ?? task.status);
     lines.push({ text: status, tone: ["blocked", "failed", "waiting", "retry_wait"].includes(task.status) ? "warning" : "muted" });
-    if (task.recovery) lines.push({ text: "Workflow recovery requested", tone: "warning" });
+    if (task.recovery && !["closed", "watching"].includes(task.status)) lines.push({ text: "Workflow recovery requested", tone: "warning" });
     if (task.branch) lines.push({ text: `Branch: ${safe(task.branch, 65)}`, tone: "muted" });
+    if (task.localBranch) lines.push({ text: `Local branch: ${safe(task.localBranch, 65)}`, tone: "muted" });
     if (task.baseBranch) lines.push({ text: `Base: ${safe(task.baseBranch, 45)}`, tone: "muted" });
     if (task.model) lines.push({ text: `Model: ${safe(task.model, 75)}`, tone: "muted" });
     lines.push({ text: `Feedback: ${task.pendingFeedback ?? 0} queued · Media: ${task.helpers ?? 0}`, tone: "muted" });
-    if (task.attempts) lines.push({ text: `Failed attempts: ${task.attempts}`, tone: "warning" });
+    if (task.attempts && !["closed", "watching"].includes(task.status)) lines.push({ text: `Failed attempts: ${task.attempts}`, tone: "warning" });
     if (task.prNumber) lines.push({ text: `PR #${task.prNumber} · ${task.phase === "merged" ? "merged" : task.prState ?? "unknown"}`, tone: "muted" });
-    if (task.error) lines.push({ text: safe(task.error), tone: "error" });
+    if (task.error && task.status !== "closed") lines.push({ text: safe(task.error), tone: "error" });
   }
   if (stale || schedulerStale) lines.push({ text: "STALE / partial data", tone: "warning" });
   lines.push({ text: `Dispatcher updated: ${ago(snapshot.dispatcherAt, now)}`, tone: "muted" });
