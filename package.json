@@ -39,14 +39,14 @@
     "test:tui": "bun --conditions=browser test/fixtures/sidebar-render.ts"
   },
   "dependencies": {
-    "@opencode/client": "0.0.0-beta-19398",
-    "@opencode/plugin": "0.0.0-beta-19398",
+    "@opencode/client": "2.0.6",
+    "@opencode/plugin": "2.0.6",
     "proper-lockfile": "^4.1.2",
     "zod": "^4.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opencode/theme": "0.0.0-beta-19398",
+    "@opencode/theme": "2.0.6",
     "@opentui/core": "0.5.10",
     "@opentui/solid": "0.5.10",
     "@types/node": "^22.0.0",

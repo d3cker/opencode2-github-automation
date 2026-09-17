@@ -72,8 +72,9 @@ In the shared background service, each scheduler/dispatcher component renews one
 empty maintenance session in the owner location at startup and every ten minutes.
 OpenCode counts durable session events as activity; polling plugin APIs alone
 does not prevent its hourly inactivity eviction. No model is prompted by keepalive.
-The service PID must match the plugin process before any maintenance session is
-created. Shutdown releases local SDK waits independently of adapter cancellation,
+The service is discovered through `/api/info`; `server.info` must report the plugin
+process PID before any maintenance session is created. `session.update` refreshes
+its title without prompting a model. Shutdown releases local SDK waits independently of adapter cancellation,
 settles state writes, bounds RPC disposal, and releases locks. A healthy worktree
 session continues and the replacement owner reconciles its saved identity.
 

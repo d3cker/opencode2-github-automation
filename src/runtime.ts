@@ -120,7 +120,7 @@ export async function setupRuntime(ctx: Plugin.Context, options: GithubOptions) 
             if (!answer || answer.error || answer.finish !== "stop") throw new Error("Media helper returned no completed answer");
             return { content: `Media helper ${id}:\n${JSON.stringify(answer).slice(0, 24000)}` };
           } catch (error) {
-            if (sessionRequest.signal.aborted) await ctx.session.interrupt({ sessionID: id, continue: false }, { signal: AbortSignal.timeout(15000) }).catch(() => {});
+            if (sessionRequest.signal.aborted) await ctx.session.interrupt({ sessionID: id, resume: false }, { signal: AbortSignal.timeout(15000) }).catch(() => {});
             throw error;
           }
         },

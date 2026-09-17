@@ -324,7 +324,7 @@ test("a real wait deadline records a recoverable session stop and interrupts onc
 test("task closure interrupts all saved sessions, tolerates missing ones and waits for idleness", async () => {
   const interrupted: string[] = [], waited: string[] = [];
   const ctx = { session: {
-    interrupt: async ({ sessionID }: { sessionID: string }) => { interrupted.push(sessionID); if (sessionID === "gone") throw { _tag: "Session.NotFoundError" }; },
+    interrupt: async (input: { sessionID: string; resume?: boolean }) => { assert.deepEqual(input, { sessionID: input.sessionID, resume: false }); interrupted.push(input.sessionID); if (input.sessionID === "gone") throw { _tag: "Session.NotFoundError" }; },
     wait: async ({ sessionID }: { sessionID: string }) => { waited.push(sessionID); },
   } } as unknown as Plugin.Context;
   const t = { ...task(), sessionID: "main", sessionIDs: ["main", "previous", "gone"], helpers: [{ id: "media", parentID: "main", capability: "vision" as const }] };

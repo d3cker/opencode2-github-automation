@@ -288,7 +288,7 @@ export class OpenCodeExecutor implements Executor {
     const results = await Promise.allSettled(ids.map(async sessionID => {
       const request = { signal: AbortSignal.timeout(15_000) };
       try {
-        await this.ctx.session.interrupt({ sessionID, continue: false }, request);
+        await this.ctx.session.interrupt({ sessionID, resume: false }, request);
         if (related) await this.ctx.session.wait({ sessionID }, request);
       } catch (error) { if (!isNotFound(error)) throw error; }
     }));

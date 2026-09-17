@@ -16,7 +16,8 @@ happen inside `running`; they are not additional persisted phases.
 
 ```mermaid
 flowchart TD
-    Load[Load combined automation plugin] --> Owner{Primary Git checkout root?}
+    Activate[Open TUI or call plugin.list for the owner location] --> Load[Load combined automation plugin]
+    Load --> Owner{Primary Git checkout root?}
     Owner -->|No or outside Git| Inactive[Plugin stays inactive]
     Owner -->|Yes| Config[Use nonempty plugin options or read .opencode/automation.json]
     Config -->|No project config| Inactive
@@ -49,8 +50,9 @@ flowchart TD
     Merge --> Worker
     RPC -.-> Keepalive[Each component touches the same empty owner session every ten minutes]
     State -.-> Keepalive
-    Keepalive --> PID{Registered service PID matches this process?}
-    PID -->|Yes| Touch[Create or reuse maintenance session, then emit rename event]
+    Keepalive --> Discover[Discover service through /api/info]
+    Discover --> PID{server.info PID matches this process?}
+    PID -->|Yes| Touch[Create or reuse maintenance session, then session.update its title]
     PID -->|No| Skip[Skip keepalive]
     Stop[Owner reload or shutdown] --> Cleanup[Stop timers, save stopped inventory snapshots, settle writes, dispose RPC, release locks]
     Cleanup --> Preserve[Preserve durable queue and healthy worktree execution]
@@ -90,7 +92,9 @@ flowchart TD
 - Each component renews one empty owner maintenance session at startup and every
   ten minutes. Durable session events refresh OpenCode's inactivity timer; listing
   plugins does not. No model is prompted. A PID check prevents touching a different
-  service. Requests do not overlap and have a 15-second deadline. Pausing issue
+  service, using `server.info` after discovery through `/api/info` in SDK 2.0.6.
+  The title update uses `session.update`. Requests do not overlap and have a
+  15-second deadline. Pausing issue
   scans does not pause keepalive. Standalone servers without a matching registered
   service skip it.
 - State is schema-validated and saved through a temporary file, file sync, and
@@ -309,13 +313,13 @@ sequenceDiagram
     alt Operator closes task
         U->>D: Confirm Stop and close task in bot menu
         D->>D: Persist closing and reject new checkpoints and prompts
-        D->>S: Interrupt known task sessions and wait for idleness
+        D->>S: Interrupt known task sessions with resume false and wait for idleness
         D->>D: Drain in-flight worker and persist closed
         Note over D,G: Preserve work and history, no GitHub closure request
     else Operator cancels the round
         U->>D: Confirm Cancel current round
         D->>D: Persist cancelling and reject new execution checkpoints
-        D->>S: Interrupt saved sessions and wait for idleness
+        D->>S: Interrupt saved sessions with resume false and wait for idleness
         D->>D: Drain worker and question posts, archive round, enter watching
         Note over D,G: Keep PR tracking and future feedback, preserve cancelled worktree
     else Owner is disposed
@@ -408,7 +412,7 @@ flowchart TD
     ID --> Session[Get saved helper or create only on explicit not-found]
     Session --> Prompt[Send deterministic attachment prompt, hooks disable all tools]
     Prompt --> Wait[Wait with session deadline]
-    Wait -->|Timeout| Interrupt[Attempt helper interruption and return error]
+    Wait -->|Timeout| Interrupt[Interrupt helper with resume false and return error]
     Wait -->|Other failure| Error
     Wait -->|Completed| Result{Succeeded outcome and non-error final assistant with finish stop?}
     Result -->|No| Error
@@ -724,7 +728,7 @@ flowchart TD
     Close[bot menu: Stop and close task] --> Flight{Publication or merge already in flight?}
     Flight -->|Yes| RejectClose[Reject closure, wait and try again]
     Flight -->|No| SaveClose[Persist closing before interruption]
-    SaveClose --> Interrupt[Interrupt known sessions, missing sessions count as stopped]
+    SaveClose --> Interrupt[Interrupt with resume false, missing sessions count as stopped]
     Interrupt --> Drain[Wait for current worker and pending question posts]
     Drain --> Again[Interrupt again to cover in-flight session creation]
     Again --> Closed[Persist closed, preserve history and all local work]
@@ -735,7 +739,7 @@ flowchart TD
     CancelRound[Cancel current round] --> Publish{Publication or merge in flight?}
     Publish -->|Yes| RejectClose
     Publish -->|No| SaveCancel[Persist cancelling, block prompts, hooks and checkpoints]
-    SaveCancel --> DrainCancel[Interrupt sessions, drain worker and questions, interrupt again]
+    SaveCancel --> DrainCancel[Interrupt with resume false, drain worker and questions, interrupt again]
     DrainCancel -->|Success| Watch[Archive round, clear live errors, enter watching]
     DrainCancel -->|Failure| RetryCancel[Keep cancelling and error, retry after 30 seconds or owner restart]
     RetryCancel --> DrainCancel

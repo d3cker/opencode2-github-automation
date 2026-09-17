@@ -18,6 +18,11 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Restore compatibility with OpenCode 2.0.6: update the pinned SDKs, discover
+  services through `/api/info`, refresh owner activity with `session.update`,
+  and interrupt sessions with `resume: false`. Replace the removed headless
+  activation command with location-scoped `plugin.list` and document validation.
+
 - Honor formal approvals for the exact verified PR commit even when publication
   or description recovery finishes later. Retain review revocation, authorization,
   and merge-readiness checks; keep timestamp gating for unbound merge comments.

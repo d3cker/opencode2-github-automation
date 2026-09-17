@@ -59,10 +59,10 @@ test("owner heartbeat only touches the matching service process and owner direct
   const calls: string[] = [];
   let pid = process.pid + 1;
   const client: OwnerClient = {
-    health: { get: async () => ({ pid }) },
+    server: { info: async () => ({ pid }) },
     session: {
       create: async input => { calls.push(input.location.directory); return input; },
-      rename: async () => { calls.push("activity"); },
+      update: async () => { calls.push("activity"); },
     },
   };
   const signal = new AbortController().signal;
@@ -78,11 +78,11 @@ test("keepalive emits durable owner activity, reuses one session, and never invo
   let session: Awaited<ReturnType<OwnerClient["session"]["create"]>> | undefined;
   let created = 0, renamed = 0, clock = 0, expiresAt = 60;
   const client: OwnerClient = {
-    health: { get: async () => ({ pid: process.pid }) },
+    server: { info: async () => ({ pid: process.pid }) },
     session: {
       create: async input => { if (!session) { session = input; created++; } assert.equal(input.id, session.id); return session; },
       // OpenCode LocationActivity refreshes only on durable SessionEvent events.
-      rename: async ({ sessionID }) => { assert.equal(sessionID, session!.id); expiresAt = clock + 60; renamed++; },
+      update: async ({ sessionID }) => { assert.equal(sessionID, session!.id); expiresAt = clock + 60; renamed++; },
     },
   };
   for (clock = 0; clock <= 180; clock += 10) {

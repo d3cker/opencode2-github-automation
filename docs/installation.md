@@ -44,7 +44,7 @@ hook; remove the OpenCode loaders first as described in the README.
 
 ## Prerequisites
 
-- OpenCode **2**, with a working model. Tested SDK version: `0.0.0-beta-19398`.
+- OpenCode **2.0.6**, with a working model. Client/plugin SDK version: `2.0.6`.
 - Node.js 22+, npm, Git, and Bash on macOS/Linux.
 - GitHub authentication and permission to comment, push, create PRs, and merge.
 - A target repository with issues enabled and at least one pushed commit.
@@ -112,6 +112,29 @@ Node-based management CLI. Package validation still imports the server and TUI
 entrypoints in an isolated Node installation without initializing a renderer.
 
 ## Testing and migration
+
+### OpenCode 2.0.6 compatibility
+
+This branch pins `@opencode/client`, `@opencode/plugin`, and the development theme
+package to `2.0.6`. Update the automation package when upgrading OpenCode from the
+older beta build. An old package can still appear active and scan GitHub while
+its management CLI and owner keepalive fail to discover the newer service.
+
+Service discovery now probes `/api/info`. Owner keepalive verifies the service
+PID with `client.server.info()` and updates the same empty maintenance session
+through `session.update`. Session interruption uses `resume: false` to stop work
+without automatically resuming it. The package does not claim compatibility
+with the earlier beta API.
+
+For headless startup, use `opencode2 api plugin.list --param
+'location[directory]=/absolute/path/to/project'` on one line. Confirm that
+`automation` is `active` in the response and repeat for each owner after a
+service restart. The old `v2.plugin.awaitActivation` operation is unavailable.
+`opencode2 api session.active` lists active execution before a planned restart.
+After upgrading, verify `opencode2-automation status` inside each owner checkout,
+fresh dispatcher/scheduler timestamps, and `/bot` in a reopened TUI.
+
+### State preservation
 
 Use a separate test repository when testing on another machine. Independent
 machines do not share queue ownership and can duplicate work on the same issues.

@@ -4,7 +4,7 @@ The [README](../README.md) covers the combined package and setup wizard. Use
 `examples/advanced.opencode.jsonc` for custom schedules, multiple repositories,
 or separately loaded scheduler and dispatcher components.
 
-Both components use only the OpenCode **2** SDK, pinned to `0.0.0-beta-19398`:
+Both components use only the OpenCode **2** SDK, pinned to `2.0.6`:
 
 - `automation.scheduler`: invokes configured RPC methods on an interval.
 - `automation.github`: owns issue discovery, comments, isolated work, verification,

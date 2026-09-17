@@ -13,10 +13,10 @@ export async function cleanup(...steps: (() => void | Promise<void>)[]) {
 }
 
 export interface OwnerClient {
-  health: { get(options: { signal: AbortSignal }): Promise<{ pid: number }> };
+  server: { info(options: { signal: AbortSignal }): Promise<{ pid: number }> };
   session: {
     create(input: { id: string; title: string; location: { directory: string }; metadata: Record<string, string> }, options: { signal: AbortSignal }): Promise<{ id: string; location: { directory: string }; metadata?: Record<string, unknown> }>;
-    rename(input: { sessionID: string; title: string }, options: { signal: AbortSignal }): Promise<unknown>;
+    update(input: { sessionID: string; title: string }, options: { signal: AbortSignal }): Promise<unknown>;
   };
 }
 
@@ -28,7 +28,7 @@ export async function touchOwner(directory: string, signal: AbortSignal, connect
   if (!client) return false;
   // A standalone server must never activate a second owner in a different
   // background service. The public request must return to this exact process.
-  if ((await client.health.get({ signal })).pid !== process.pid) return false;
+  if ((await client.server.info({ signal })).pid !== process.pid) return false;
   // OpenCode's inactivity sweep observes durable session events, NOT HTTP
   // requests or plugin RPC. Reuse one empty maintenance session; never prompt
   // a model, touch a user's session, or create a new session on every tick.
@@ -36,8 +36,8 @@ export async function touchOwner(directory: string, signal: AbortSignal, connect
   const title = "Automation owner keepalive";
   const session = await client.session.create({ id, title, location: { directory }, metadata: { automation: "owner-keepalive" } }, { signal });
   if (session.location.directory !== directory || session.metadata?.automation !== "owner-keepalive") throw new Error("Automation keepalive session identity mismatch");
-  // Rename emits Session.Renamed even when the title is unchanged.
-  await client.session.rename({ sessionID: session.id, title }, { signal });
+  // Updating the title emits durable owner activity without prompting a model.
+  await client.session.update({ sessionID: session.id, title }, { signal });
   return true;
 }
 

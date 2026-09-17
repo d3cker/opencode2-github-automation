@@ -11,7 +11,7 @@ titles, and can merge after an authorized approval. The TUI is optional.
 
 ## Requirements
 
-- OpenCode **2** with a working model; tested with `0.0.0-beta-19398`.
+- OpenCode **2.0.6** with a working model; client/plugin SDK pinned to `2.0.6`.
 - Node.js 22+, npm, and Git on macOS/Linux.
 - GitHub authentication (`gh auth login` and `gh auth setup-git`, or a token in
   the service environment) and permission to comment, push, and create PRs.
@@ -113,12 +113,18 @@ Only the authenticated GitHub user is allowed by default; add colleagues to
 Run once for **each configured primary checkout**, with its absolute path:
 
 ```bash
-opencode2 api v2.plugin.awaitActivation --param 'location[directory]=/absolute/path/to/your-project'
+opencode2 api plugin.list --param 'location[directory]=/absolute/path/to/your-project'
 ```
 
 This starts the shared service if needed and loads the project's plugins. The
-command exits; the bot keeps running without a TUI or extra monitoring process.
+response lists the loaded plugins; confirm `automation` has `state.status` equal
+to `active`. The command exits; the bot keeps running without a TUI or extra monitoring process.
 **Repeat it after every service restart.**
+
+OpenCode 2.0.6 uses operation names without the `v2.` prefix and no longer exposes
+`plugin.awaitActivation`. Upgrade the automation package together with OpenCode;
+older beta SDKs cannot discover its service correctly. See
+[upgrade compatibility](docs/installation.md#opencode-206-compatibility).
 
 For automatic startup after a machine reboot, put one invocation per project in
 your operating system's startup mechanism, under the same user, after networking
