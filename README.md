@@ -268,6 +268,10 @@ installations are not removed by `npm uninstall --global`.
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work
   on an open PR without another mention, after the current round publishes.
+- **PR descriptions:** the successful session's final summary appears in the PR,
+  with dispatcher checks listed separately. Follow-ups keep the original report
+  and replace **Latest update**. Keep manual notes outside the managed HTML markers.
+  See [PR descriptions](docs/runtime.md#pr-descriptions).
 - **Recovery:** completing a stopped bot session manually is detected by the
   dispatcher, which verifies and publishes before processing queued comments.
   Use `/restartworkflow` in the owner project's TUI or

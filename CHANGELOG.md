@@ -18,6 +18,11 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Use the successful session's final completion report as the PR description instead
+  of its initial acknowledgement. Persist reports across restarts, retain the
+  original summary plus the latest follow-up, distinguish dispatcher checks from
+  agent-reported tests, and preserve manual notes outside the managed section.
+
 - Reconcile timed-out or interrupted sessions completed manually after a blocked
   task or service restart. Verify and publish through the dispatcher, then process
   queued issue feedback on the same branch and PR, including legacy checkpoints.

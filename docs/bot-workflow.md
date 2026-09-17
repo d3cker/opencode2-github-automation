@@ -195,7 +195,8 @@ flowchart TD
     Stopped -->|Manual continuation succeeds and probe passes| R
     Stopped -->|Explicit restartworkflow| Recover[Persist recovery intent, rejoin the same session]
     Recover --> R
-    R -->|Validated success, no unresolved question| V[verifying: configured checks and commit]
+    R -->|Validated success, no unresolved question| Report[Persist final public assistant summary with session and round]
+    Report --> V[verifying: configured checks and commit]
     V --> P[publishing: reconcile or create PR, push when required]
     V -->|Failed check or Git consistency guard| VB[verifying / blocked]
     VB -->|Operator retries saved stage| V
@@ -311,6 +312,7 @@ sequenceDiagram
     else Wait completes
         D->>S: Read context and final outcome
         alt Valid task marker, admitted recovery marker if required, and successful final assistant
+            D->>D: Save final public assistant text with session and round
             D->>D: Clear recovery state and advance to verifying
         else Unsuccessful final outcome or assistant
             D->>D: Save session-stop block for later reconciliation
@@ -415,7 +417,8 @@ Source: [runtime.ts — inspect_media](../src/runtime.ts).
 
 ```mermaid
 flowchart TD
-    Start[Validated session success or retry of verifying phase] --> Identity[Require saved workspace and base, exact managed root, branch and shared repository]
+    Start[Validated session success or retry of verifying phase] --> Report[Reuse saved completion summary or recover from saved session]
+    Report --> Identity[Require saved workspace and base, exact managed root, branch and shared repository]
     Identity --> Base[Require baseSha ancestor of HEAD and no unresolved conflicts]
     Base --> Checks[Run configured checks sequentially, or none if list empty]
     Checks -->|Configured check fails| Block[blocked at saved phase, retain work]
@@ -426,22 +429,28 @@ flowchart TD
     Identity -->|Explicit consistency guard fails| Block
     Base -->|Unresolved conflicts| Block
     Validate -->|Explicit consistency guard fails| Block
-    Validate -->|Pass| Save[Persist checks and exact commit SHA, phase publishing]
-    Retry[Retry saved publishing phase] --> Find
-    Save --> Find[Find branch PR including closed PRs]
+    Validate -->|Pass| Save[Persist summary, checks and exact commit SHA, phase publishing]
+    Retry[Retry saved publishing phase] --> Body
+    Save --> Body[Recover missing legacy summary, save original report and render body]
+    Body --> Find[Find branch PR including closed PRs]
     Find --> Follow{Follow-up round?}
     Follow -->|Yes| Open{Existing PR open?}
     Open -->|No| Block
     Open -->|Yes| Push[Validate origin, workspace, saved HEAD and clean tree, push exact SHA]
     Follow -->|No| Exists{PR already exists?}
-    Exists -->|Yes| Done[Record PR and publication time, pr_opened / done]
+    Exists -->|Yes| Closed{PR closed?}
+    Closed -->|Yes| Done[Record PR and publication time, pr_opened / done]
+    Closed -->|No| Description
     Exists -->|No| Title[Generate title only if no saved prTitle]
     Title --> Issue{Issue still open?}
     Issue -->|No| Block
     Issue -->|Yes| PushNew[Validate origin and workspace, push exact verified SHA]
     PushNew --> Create[Create or reconcile signed PR against pinned base]
-    Create --> Done
-    Push --> Done
+    Create --> Description[Read open PR at verified SHA, reconcile managed description]
+    Push --> Description
+    Description -->|Edited managed block, changed head or oversized body| Block
+    Description -->|Unchanged or update succeeds| Acknowledge[Persist published body checkpoint]
+    Acknowledge --> Done
     Failure[Other command, model or transport error] --> Policy[Keep current phase and apply retry policy in section 8]
     Close[Operator closes task before publishing starts] --> Drain[Finish in-flight local operation, reject next checkpoint]
     Drain --> Preserve[Do not publish, preserve existing local changes]
@@ -455,15 +464,36 @@ pushed branch does not by itself make a task complete.
 
 The configured checks are command argument arrays. A failing configured check
 produces `blocked`. With no configured checks, only Git consistency checks run;
-the PR explicitly states that automated tests were not run. Commit hooks changing
+the PR explicitly says the dispatcher did not independently rerun agent-reported
+tests. Commit hooks changing
 the recorded tree, a dirty worktree after commit, or no diff from the base block
 publication. Other command failures use the general error policy below.
 
-The PR body contains the analysis, `Closes #N`, checks, session ID, and verified
-commit SHA. Push uses `COMMIT:refs/heads/TASK_BRANCH` without force. The first
-publication reconciles an existing branch PR by recording it without another
-push; follow-ups require an open PR and push the new verified commit. Follow-ups
-do not regenerate the existing PR title or body.
+The PR body uses the final public text of the successful assistant response,
+with its Markdown preserved, rather than the pre-work analysis acknowledgement.
+The executor saves it with the session and round before verification; verification
+adds the checks and exact commit to the same snapshot. No extra model call rewrites
+the report. Reasoning, tools, and failed or unfinished responses are excluded.
+Missing legacy snapshots are read from the saved session; a missing session or
+empty response produces an explicit summary-unavailable notice, never analysis
+as a fallback. Transport errors retain the stage for retry.
+
+The body keeps the original report and replaces one **Latest update** section on
+follow-ups. Dispatcher checks appear separately from agent-reported tests, followed
+by `Closes #N`, session, round and verified commit. Push uses
+`COMMIT:refs/heads/TASK_BRANCH` without force. The first publication reconciles an
+existing branch PR without another push; follow-ups require an open PR and push
+the new verified commit before updating its description. The title is retained.
+An already closed first-round PR is recorded without editing its description.
+
+A stable HTML marker pair encloses the bot-managed description. Notes outside
+it are preserved; an edited or removed managed section blocks publication rather
+than overwriting it. The last acknowledged body is checkpointed, so a lost update
+response can be reconciled without duplicate sections. Exact legacy descriptions
+can be replaced; otherwise unmarked content is retained and the managed section
+appended. GitHub is reread before writing to detect concurrent edits, although
+there is no atomic compare-and-swap across that read and write. See
+[publication recovery and limits](advanced.md#pr-description-recovery) for details.
 
 Signed comments use stable `opencode2` markers; reconciliation looks for a marker
 posted by the authenticated account. This covers analysis acknowledgements,
@@ -471,7 +501,8 @@ questions, and merge acknowledgements after a lost response.
 
 Sources: [executor.ts — GitWorkspace.verify, push, title](../src/executor.ts),
 [dispatcher.ts — publishing](../src/dispatcher.ts),
-[github.ts — ensureComment, ensurePull](../src/github.ts).
+[github.ts — ensureComment, ensurePull, updatePullBody](../src/github.ts),
+[pr-description.ts — extraction, rendering and reconciliation](../src/pr-description.ts).
 
 ## 7. Feedback, merge approval, and tab closure
 
@@ -482,7 +513,8 @@ flowchart TD
     Keep --> Recovery[Session recovery and publication must finish first]
     Recovery --> Done
     Done -->|Yes| Round[Next worker pass starts one new round on saved branch and worktree]
-    Round --> Guard[Require open issue, open original PR and authorized feedback, then analyze again]
+    Round --> Snapshot[Retain original report and published body, reset current completion]
+    Snapshot --> Guard[Require open issue, open original PR and authorized feedback, then analyze again]
     Idle[Worker has no eligible execution task] --> Eligible{Auto-merge enabled and done task eligible?}
     Eligible -->|No| Later[Wait for a later worker pass]
     Eligible -->|Yes| Since{publishedAt exists?}
@@ -549,7 +581,8 @@ or a request failure records `mergeError`; error retries also respect GitHub tim
 An already-merged response can reconcile a previously lost merge response.
 
 Follow-up rounds reset analysis, question, current session, session-stop/recovery
-state, checks, and commit; they retain the branch, worktree, pinned base, and previous session reference.
+state, current completion summary, checks, and commit; they retain the original
+report, last published body, branch, worktree, pinned base, and previous session reference.
 Preparation reuses the saved worktree path rather than deriving a new path from
 the branch name. A renamed branch can therefore retain its original directory.
 Preparation, verification, and push all check the managed path, exact Git root,
@@ -595,7 +628,7 @@ An error normally preserves the phase so retry continues from its checkpoint.
 | `ready` | Eligible for worker selection when due. |
 | `waiting` | Awaiting an issue answer; no implementation or publication while unresolved. |
 | `retry_wait` | Transient failure; automatic retry after `nextAt`. |
-| `blocked` | Explicit `Blocked` error or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
+| `blocked` | Explicit `Blocked` or PR-description conflict, or GitHub HTTP 401, 404, or 422; requires inspection/retry, except a stopped session completed manually is reconciled automatically. |
 | `failed` | Other errors reached `maxAttempts`; operator recovery/retry required unless the checkpoint also qualifies as a stopped-session recovery candidate. |
 | `done` | PR publication/reconciliation completed; feedback and merge monitoring remain possible. |
 | `closing` | Operator requested end of tracking; interrupt sessions and drain in-flight work, retaining errors for retry. |
@@ -606,7 +639,7 @@ flowchart TD
     Work[Execute saved phase] --> Result{Result?}
     Result -->|WaitingForAnswer| Wait[waiting, or ready if answer already arrived]
     Result -->|SessionStopped| Stop[running / blocked, sessionStopped true]
-    Result -->|Other Blocked or GitHub 401, 404, 422| Block[blocked at saved phase]
+    Result -->|Other Blocked, description conflict or GitHub 401, 404, 422| Block[blocked at saved phase]
     Result -->|Other failure below attempt limit| Retry[retry_wait at saved phase]
     Retry -->|nextAt elapsed| Work
     Result -->|Other failure at limit| Fail[failed at saved phase]

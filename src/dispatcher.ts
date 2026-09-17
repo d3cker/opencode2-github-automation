@@ -6,6 +6,7 @@ import { Serial, redact, type Store } from "./state.js";
 import { branchText, type BranchInput, type BaseChoice } from "./branch.js";
 import { activityOf, type Activity } from "./activity.js";
 import type { DispatcherMonitor } from "./monitor.js";
+import { CompletionSummary, DescriptionConflict, renderDescription } from "./pr-description.js";
 import { AnalysisDecision } from "./analysis.js";
 
 export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sessionID: z.string().optional(), purpose: z.enum(["base", "analysis"]).optional(), commentID: z.number().optional(),
@@ -35,6 +36,8 @@ export const Task = z.object({
   previousSessionID: z.string().optional(),
   checks: z.array(z.string()).optional(), commit: z.string().optional(),
   publishedAt: z.number().optional(), merged: z.boolean().optional(), mergeError: z.string().optional(), mergeNextAt: z.number().optional(),
+  completion: CompletionSummary.optional(), initialCompletion: CompletionSummary.optional(),
+  publishedBody: z.string().optional(),
   prTitle: z.string().min(1).max(240).optional(),
   pr: z.object({ number: z.number(), html_url: z.string(), state: z.string() }).optional(), error: z.string().optional(),
 });
@@ -64,12 +67,14 @@ export interface GithubPort {
   ensureComment(repo: string, number: number, marker: string, body: string): Promise<number>;
   findPull(repo: string, branch: string): Promise<Pull | undefined>;
   pull(repo: string, number: number): Promise<Pull>;
+  updatePullBody(repo: string, number: number, commit: string, key: string, body: string, previous?: string, legacy?: string): Promise<void>;
   ensurePull(repo: string, branch: string, base: string, title: string, body: string): Promise<Pull>;
 }
 export interface Executor {
   selectBase(task: Task, repo: Repository, inputs: BranchInput[]): Promise<BaseChoice>;
   hasBranch(repo: Repository, branch: string): Promise<boolean>;
   analyze(task: Task): Promise<AnalysisDecision>;
+  summary(task: Task): Promise<CompletionSummary>;
   title(task: Task): Promise<string>;
   prepare(task: Task, repo: Repository): Promise<{ worktree: string; baseSha: string }>;
   run(task: Task, checkpoint: (patch: Partial<Task>) => Promise<void>): Promise<void>;
@@ -245,7 +250,7 @@ export class Dispatcher {
       Object.assign(finished, { round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
         phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
         analysisDecision: undefined, analysisDialogue: undefined, question: undefined,
-        sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, checks: undefined, commit: undefined, error: undefined });
+        sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, completion: undefined, checks: undefined, commit: undefined, error: undefined });
       await this.store.save(this.queue);
     });
     const resumable = this.queue.tasks.filter(t => ["ready", "retry_wait"].includes(t.status));
@@ -298,16 +303,28 @@ export class Dispatcher {
         requireTracked(task);
         await this.executor.run(task, patch => this.update(task, patch));
         if (task.question && !task.question.delivered) throw new WaitingForAnswer("Waiting for a reply in the GitHub issue");
+        await this.captureCompletion(task);
         await this.update(task, { phase: "verifying", attempts: 0, sessionStopped: undefined, recovery: undefined });
       }
       if (task.phase === "verifying") {
         requireTracked(task);
+        await this.captureCompletion(task);
         const result = await this.executor.verify(task, repo);
-        await this.update(task, { ...result, phase: "publishing", attempts: 0 });
+        await this.update(task, { ...result, completion: { ...task.completion!, ...result }, phase: "publishing", attempts: 0 });
       }
       if (task.phase === "publishing") {
         requireTracked(task);
         this.publishing.add(task.key);
+        await this.captureCompletion(task);
+        if (task.completion?.commit !== task.commit) await this.update(task, { completion: { ...task.completion!, commit: task.commit, checks: task.checks ?? [] } });
+        if (!task.initialCompletion) {
+          const earlier = task.sessionIDs?.find(id => id !== task.sessionID) ?? task.previousSessionID;
+          const initial = !followup ? task.completion! : earlier
+            ? await this.executor.summary({ ...task, sessionID: earlier, round: undefined })
+            : { unavailable: "The original completion session is not recorded." };
+          await this.update(task, { initialCompletion: initial });
+        }
+        const body = renderDescription(task.key, task.issue.number, task.initialCompletion!, task.completion!);
         let pr = await this.github.findPull(task.repo, task.branch);
         if (followup && (!pr || pr.state !== "open")) throw new Blocked("The original PR is no longer open; changes remain in the worktree");
         if (followup && pr) await this.executor.push(task, repo);
@@ -315,17 +332,26 @@ export class Dispatcher {
           if (!task.prTitle) await this.update(task, { prTitle: await this.executor.title(task) });
           if ((await this.github.issue(task.repo, task.issue.number)).state !== "open") throw new Blocked("Issue closed before PR publication");
           await this.executor.push(task, repo);
-          pr = await this.github.ensurePull(task.repo, task.branch, repo.baseBranch, task.prTitle!, `${task.analysis}\n\nCloses #${task.issue.number}\n\nChecks:\n${task.checks?.length ? task.checks.map(c => `- ${c}`).join("\n") : "- Automated tests were not run: no test command configured. Only Git consistency checks were performed."}\n\nOpenCode session: ${task.sessionID}\nCommit: ${task.commit}`);
+          pr = await this.github.ensurePull(task.repo, task.branch, repo.baseBranch, task.prTitle!, body);
         }
-        await this.update(task, { pr, publishedAt: this.now(), phase: "pr_opened", status: "done", attempts: 0 });
+        if (pr.state === "open") {
+          const legacy = `${task.analysis}\n\nCloses #${task.issue.number}\n\nChecks:\n${task.checks?.length ? task.checks.map(c => `- ${c}`).join("\n") : "- Automated tests were not run: no test command configured. Only Git consistency checks were performed."}\n\nOpenCode session: ${task.sessionID}\nCommit: ${task.commit}`;
+          await this.github.updatePullBody(task.repo, pr.number, task.commit!, task.key, body, task.publishedBody, legacy);
+        }
+        await this.update(task, { publishedBody: pr.state === "open" ? body : task.publishedBody, pr, publishedAt: this.now(), phase: "pr_opened", status: "done", attempts: 0 });
       }
     } catch (error) {
       if (this.signal.aborted || closing(task) || error instanceof TaskClosed) return;
       if (error instanceof WaitingForAnswer) { await this.update(task, { status: task.question?.answer ? "ready" : "waiting", error: undefined }); return; }
       const attempts = task.attempts + 1;
-      const blocked = error instanceof Blocked || error instanceof GithubError && [401, 404, 422].includes(error.status);
+      const blocked = error instanceof Blocked || error instanceof DescriptionConflict || error instanceof GithubError && [401, 404, 422].includes(error.status);
       await this.update(task, { attempts, sessionStopped: error instanceof SessionStopped, error: redact(error, this.secrets), status: blocked ? "blocked" : attempts >= this.options.maxAttempts ? "failed" : "retry_wait", nextAt: Math.max(this.now() + Math.min(3600, 5 * 2 ** attempts) * 1000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
     } finally { this.publishing.delete(task.key); }
+  }
+  private async captureCompletion(task: Task) {
+    if (task.completion?.sessionID === task.sessionID && task.completion?.round === (task.round ?? 1)) return;
+    const completion = await this.executor.summary(task);
+    await this.update(task, { completion: { ...completion, ...(task.sessionID ? { sessionID: task.sessionID } : {}), round: task.round ?? 1 } });
   }
   private async resolveAnalysis(task: Task, repo: Repository) {
     await this.update(task, { phase: "analyzing" });
@@ -486,7 +512,7 @@ export class Dispatcher {
     if (!task || !["blocked", "failed"].includes(task.status)) return false;
     if (restartSession) {
       await this.executor.cancel(task);
-      await this.update(task, { sessionID: undefined, promptAttempted: undefined, phase: task.commentID ? "commented" : "queued", analysis: task.commentID ? task.analysis : undefined });
+      await this.update(task, { sessionID: undefined, completion: undefined, promptAttempted: undefined, phase: task.commentID ? "commented" : "queued", analysis: task.commentID ? task.analysis : undefined });
     }
     if (!task.route) {
       const latest = await this.github.issue(task.repo, task.issue.number);

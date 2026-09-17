@@ -184,6 +184,12 @@ repository inspection in the implementation session.
 
 ## Final report
 
+The dispatcher copies the final public text of a successfully completed session
+into the PR description with Markdown preserved. Write a review-ready report of
+completed work, not an acknowledgement or a promise to begin. On follow-ups, report
+what changed in this round; the original report remains in the PR and this report
+becomes its Latest update. Do not include private reasoning or raw tool transcripts.
+
 Finish an implementation session with a concise English summary covering:
 
 - The behavior delivered.
