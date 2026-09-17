@@ -18,6 +18,10 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ### Fixed
 
+- Keep repository inventory RPC responses valid JSON when an owner has no runtime
+  snapshots. Isolate setup-test registries so validation never adds fixture
+  repositories to the operator's inventory.
+
 - Use the successful session's final completion report as the PR description instead
   of its initial acknowledgement. Persist reports across restarts, retain the
   original summary plus the latest follow-up, distinguish dispatcher checks from

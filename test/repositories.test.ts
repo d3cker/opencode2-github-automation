@@ -33,7 +33,9 @@ test("inventory is read-only and distinguishes active, paused, stale, stopped an
   const f = await fixture(); let stopD: (() => Promise<void>) | undefined, stopS: (() => Promise<void>) | undefined;
   try {
     await registerRepositories([f.entry]);
-    assert.equal((await listRepositories()).entries[0]?.status, "not-running");
+    const inactive = await listRepositories();
+    assert.equal(inactive.entries[0]?.status, "not-running");
+    assert.deepEqual(inactive, JSON.parse(JSON.stringify(inactive)), "RPC output must contain JSON values only, even before activation");
     stopD = publishRepositoryRuntime(f.project, "dispatcher", () => f.dispatcher);
     stopS = publishRepositoryRuntime(f.project, "scheduler", () => f.scheduler);
     await waitFor(async () => (await listRepositories()).entries[0]?.status === "running");

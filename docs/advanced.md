@@ -127,7 +127,8 @@ Full task history remains available through `status`; see the
 `opencode2-automation list [--json]` is independent of the current checkout and
 service discovery. `automation.github.repositories` accepts `{}` and returns the
 same `{ entries, warnings }` report on the connected server. The method reads
-local registry/snapshot files; it does not invoke RPC in other owner locations,
+local registry/snapshot files and omits absent snapshot fields so inactive or
+missing owners also produce valid JSON. It does not invoke RPC in other owner locations,
 which could activate their plugins. `/bot` → **Repositories** consumes this API.
 
 `init` and combined-plugin activation register standard configurations. Dispatcher
