@@ -22,7 +22,7 @@ flowchart TD
     Owner -->|Yes| Config[Use nonempty plugin options or read .opencode/automation.json]
     Config -->|No project config| Inactive
     Config --> Register[Register primary checkout in local user inventory without activating other owners]
-    Register --> Resolve[Validate settings and resolve GitHub auth, routes and defaults]
+    Register --> Resolve[Validate repository file policy and resolve GitHub auth, routes and defaults]
     Resolve --> Metadata[Register resolved repositories and base branches]
     Metadata --> GH[Acquire github lock and load queue.json]
     GH --> RPC[Register runtime bridge and dispatcher RPC]
@@ -297,7 +297,20 @@ sequenceDiagram
         end
     end
     D->>S: Wait for completion
-    opt Clarification or permission required
+    opt OpenCode permission evaluation
+        S->>R: Permission action, resources and current effect
+        alt Explicit OpenCode allow or deny
+            R-->>S: Preserve effect
+        else Exact saved decision for this main session
+            R-->>S: Apply saved allow or deny
+        else Repo file policy enabled, eligible action and all paths inside repo or task worktree
+            Note over R: Resolve canonical paths, exclude media helpers and unanswered questions
+            R-->>S: Allow file access without an issue question
+        else Permission still needs approval
+            R-->>S: Deny this attempt and use the question flow below
+        end
+    end
+    opt Clarification or remaining permission question
         S->>R: ask_issue / intercepted question / permission ask
         R->>D: Register against main task session
         D->>D: Persist pending question
@@ -357,6 +370,13 @@ sequenceDiagram
   phases or enforced review gates. The executor's `verifying` phase remains
   separate. A prose blocker in the final summary does not set `blocked` status;
   user-input blockers must go through `ask_issue`.
+- `autoApproveRepositoryFiles` is a repository opt-in, carried in the generated
+  worktree runtime settings. It handles `external_directory`, `read`, and `edit`
+  requests for canonical paths within the configured checkout or assigned
+  worktree. Native workers inherit task association through parent lookup; new
+  rounds use the same repository policy. Explicit denials, pending questions,
+  media-helper restrictions, and shell rules are unchanged. See
+  [configuration and reload behavior](configuration.md#repository-file-approvals).
 - One unresolved question is retained at a time. Runtime hooks remove tools and
   reject non-question tool execution while a question is pending. Native subagent
   questions are attached to the main task; the reply resumes the main session.
@@ -389,7 +409,7 @@ sequenceDiagram
   dispatcher advances to `verifying`.
 
 Sources: [executor.ts — runSession](../src/executor.ts),
-[runtime.ts](../src/runtime.ts), [prompt.ts](../src/prompt.ts),
+[runtime.ts](../src/runtime.ts), [repository-permissions.ts](../src/repository-permissions.ts), [prompt.ts](../src/prompt.ts),
 [dispatcher.ts — workOnce, question, publishQuestion, restartWorkflow](../src/dispatcher.ts).
 
 ## 5. Optional media inspection

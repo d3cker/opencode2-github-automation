@@ -29,6 +29,7 @@ OpenCode service must be running for polling to work.
 | `ownerDirectory` | Absolute path of the checkout that owns automation. Worker worktrees do not activate another scheduler. |
 | `stateDirectory` | Shared location for queues, locks, and worktrees. Keep it consistent across components and restarts. |
 | `repositories` | Repositories with existing local checkouts, default base branches, allowed authors, and checks. A natural-language request can override the base before work starts. |
+| `repositories[].autoApproveRepositoryFiles` | Opt-in file-access approval for that repository and the assigned task worktree, including worktrees outside the checkout. Defaults off; does not approve shell commands. |
 | `allowedAuthors` | GitHub users authorized to request work and approve merging. Merging also requires repository write access. |
 | `checks` | Arrays of executable arguments, e.g. `[["npm", "test"]]`. `[]` skips dispatcher test commands; the PR distinguishes this from agent-reported tests. No implicit shell. |
 | `routes` | Maps full mentions to agents and models available in OpenCode. |
@@ -47,8 +48,9 @@ OpenCode service must be running for polling to work.
 Other plugins can expose idempotent RPC methods for custom scheduler jobs. A
 transport timeout does not prove the server never executed a request.
 
-The executor uses the configured OpenCode permissions. Interactive permission
-requests are posted to the issue and suspend the task. An authorized author must
+The executor uses the configured OpenCode permissions. The optional repository
+file policy handles eligible `ask` decisions first; see
+[repository file approvals](configuration.md#repository-file-approvals). Remaining requests are posted to the issue and suspend the task. An authorized author must
 reply with the exact `/allow QUESTION_ID` or `/deny QUESTION_ID` command. Explicit
 OpenCode deny rules remain. Install project dependencies before running it or
 include suitable setup commands in your checks.
