@@ -7,10 +7,11 @@ const since = Date.parse("2026-09-10T10:00:00Z");
 const review: Review = { id: 1, user: { login: "alice" }, state: "APPROVED", commit_id: "head", submitted_at: "2026-09-10T11:00:00Z" };
 const comment: DatedComment = { id: 2, user: { login: "alice" }, body: "/merge", created_at: "2026-09-10T11:00:00Z", updated_at: "2026-09-10T11:00:00Z" };
 const policy = { enabled: true, method: "squash" as const, comments: ["/merge", "jest git, możesz mergować"] };
-test("approvals must reference the published head and must not be stale or superseded", () => {
+test("reviews must reference the published head and must not be superseded or unsubmitted", () => {
   assert.deepEqual(approvalAuthors([review], [], "head", since, policy.comments), ["alice"]);
   assert.deepEqual(approvalAuthors([review], [], "new-head", since, policy.comments), []);
-  assert.deepEqual(approvalAuthors([review], [], "head", since + 9_000_000, policy.comments), []);
+  assert.deepEqual(approvalAuthors([review], [], "head", since + 9_000_000, policy.comments), ["alice"]);
+  assert.deepEqual(approvalAuthors([{ ...review, submitted_at: null }], [], "head", since, policy.comments), []);
   for (const state of ["CHANGES_REQUESTED", "DISMISSED"]) {
     assert.deepEqual(approvalAuthors([review, { ...review, id: 3, state }], [], "head", since, policy.comments), []);
   }
@@ -41,6 +42,17 @@ test("merge API requires an allowed writer and pins the verified SHA", async () 
     const f = api(overrides); assert.equal(await f.github.mergeApproved("o/r", 2, "head", since, ["alice"], policy), false); assert.equal(f.writes.length, 0);
   }
   const stranger = api(); assert.equal(await stranger.github.mergeApproved("o/r", 2, "head", since, ["bob"], policy), false); assert.equal(stranger.writes.length, 0);
+});
+test("approval of the same SHA survives delayed publication, but an old merge comment cannot authorize it", async () => {
+  const publishedLater = since + 9_000_000;
+  const f = api();
+  assert.equal(await f.github.mergeApproved("o/r", 2, "head", publishedLater, ["alice"], policy), true);
+  assert.equal(f.writes.length, 1); assert.equal(f.writes[0]!.body.sha, "head");
+  assert.deepEqual(approvalAuthors([], [comment], "head", publishedLater, policy.comments), []);
+  assert.deepEqual(approvalAuthors([review], [], "different-head", publishedLater, policy.comments), []);
+  for (const state of ["DISMISSED", "CHANGES_REQUESTED"]) {
+    assert.deepEqual(approvalAuthors([review, { ...review, id: 3, state }], [comment], "head", publishedLater, policy.comments), []);
+  }
 });
 test("unready checks defer merging and an already merged PR reconciles without another PUT", async () => {
   const f = api({ mergeable_state: "unstable" }); await assert.rejects(f.github.mergeApproved("o/r", 2, "head", since, ["alice"], policy), /not ready/); assert.equal(f.writes.length, 0);

@@ -499,7 +499,7 @@ test("new issue feedback prevents auto-merge and merge failures remain retryable
   await d.tick(); assert.equal(merges, 1); assert.equal(d.status()[0]?.pendingFeedback?.length, 1);
 });
 
-test("upgraded queues ignore historical approvals until a new watching baseline exists", async () => {
+test("upgraded queues establish a fresh time window for unbound merge comments", async () => {
   const f = fixture(); const d = f.make(); await d.init(); await d.scan(); await d.tick();
   delete f.store.data.tasks[0]!.publishedAt;
   let since = 0; f.github.mergeApproved = async (_repo, _number, _commit, baseline) => { since = baseline; return false; };

@@ -447,7 +447,7 @@ export class Dispatcher {
       if (!["done", "watching"].includes(task.status) || !task.pr || task.pr.state === "closed" || !head || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
       const repo = this.options.repositories.find(r => r.repo === task.repo);
       if (!repo) continue;
-      // Older queues start watching now; historical approvals must not trigger an unexpected merge.
+      // Older queues need a fresh window for merge comments, which have no SHA.
       if (!head.at) { await this.update(task, { publishedAt: this.now() }); continue; }
       try {
         await this.scan(); // Pick up issue feedback before considering a completed task for merge.

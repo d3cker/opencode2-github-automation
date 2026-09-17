@@ -297,7 +297,7 @@ session and verification/report snapshots. `controlVersion` increases on operato
 transitions, so stale TUI events cannot undo explicit resumption.
 
 Watching continues PR-state discovery and accepts new authorized issue comments.
-`publishedHead` retains the successfully published SHA and approval-window time
+`publishedHead` retains the successfully published SHA and merge-comment window time
 across rounds; merge checks use it while watching. No saved published head means
 no automatic merge until the next successful publication. Old round checkpoints
 are not treated as a new successful publication. Explicit resumption validates
