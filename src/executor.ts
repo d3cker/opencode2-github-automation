@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import type { GithubOptions, Repository } from "./config.js";
 import { botPrompt } from "./prompt.js";
+import { finalReport, type CompletionSummary } from "./pr-description.js";
 import { analysisDecision } from "./analysis.js";
 import { baseChoice, type BranchInput } from "./branch.js";
 import { installWorkerPlugin } from "./worker.js";
@@ -113,6 +114,20 @@ export class OpenCodeExecutor implements Executor {
   constructor(private ctx: Plugin.Context, private options: GithubOptions, private signal: AbortSignal, private runtimeInstaller = installWorkerPlugin) {
     this.ctx = { ...ctx, ...(ctx.session ? { session: cancellable(ctx.session) } : {}), ...(ctx.generate ? { generate: cancellable(ctx.generate) } : {}) };
     this.git = new GitWorkspace(options.stateDirectory, commandRunner(signal, options.commandTimeoutSeconds * 1000, options.tokenEnv));
+  }
+  async summary(task: Task): Promise<CompletionSummary> {
+    const identity = { ...(task.sessionID ? { sessionID: task.sessionID } : {}), ...(task.round ? { round: task.round } : {}) };
+    if (!task.sessionID) return { ...identity, unavailable: "No completion session was saved." };
+    try {
+      const request = { signal: AbortSignal.any([this.signal, AbortSignal.timeout(15_000)]) };
+      const session = await this.ctx.session.get({ sessionID: task.sessionID }, request);
+      const messages = await this.ctx.session.context({ sessionID: task.sessionID }, request);
+      return { ...identity, ...finalReport(messages, session.outcome) };
+    } catch (error) {
+      this.signal.throwIfAborted();
+      if (isNotFound(error)) return { ...identity, unavailable: "The saved completion session is no longer available." };
+      throw error; // Retry transient transport failures without losing an available report.
+    }
   }
   async title(task: Task) {
     if (!task.route || !task.sessionID) throw new Blocked("Missing session for PR title assessment");
@@ -257,6 +272,7 @@ export class OpenCodeExecutor implements Executor {
     session = await sessions.get({ sessionID }, request);
     const last = messages.filter(m => m.type === "assistant").at(-1);
     if (session.outcome !== "succeeded" || !last || last.error || last.finish !== "stop") throw new SessionStopped("Session did not complete successfully; continue the session or use /restartworkflow");
+    await checkpoint({ completion: { sessionID, round: task.round ?? 1, ...finalReport(messages, session.outcome) } });
   }
   verify(task: Task, repo: Repository) { return this.git.verify(task, repo); }
   push(task: Task, repo: Repository) { return this.git.push(task, repo); }

@@ -30,7 +30,7 @@ OpenCode service must be running for polling to work.
 | `stateDirectory` | Shared location for queues, locks, and worktrees. Keep it consistent across components and restarts. |
 | `repositories` | Repositories with existing local checkouts, default base branches, allowed authors, and checks. A natural-language request can override the base before work starts. |
 | `allowedAuthors` | GitHub users authorized to request work and approve merging. Merging also requires repository write access. |
-| `checks` | Arrays of executable arguments, e.g. `[["npm", "test"]]`. `[]` skips automated tests and reports that in the PR. No implicit shell. |
+| `checks` | Arrays of executable arguments, e.g. `[["npm", "test"]]`. `[]` skips dispatcher test commands; the PR distinguishes this from agent-reported tests. No implicit shell. |
 | `routes` | Maps full mentions to agents and models available in OpenCode. |
 | `routes[tag].capabilities` | Main model capabilities: `text`, `vision`, `audio`; omitted means text only. |
 | `routes[tag].mediaModel` | `{ model: { providerID, id }, capabilities: ["text", "vision"] }` for the media helper. |
@@ -232,3 +232,35 @@ See [runtime management](runtime.md#manage-tasks-from-bot) for the UI and limits
 While a closure is pending, the dispatcher does not start another worker pass.
 An unrelated already-running task can finish; scanning continues for other tasks.
 The monitor reports task maintenance until closure completes.
+
+
+## PR description recovery
+
+Task state stores `completion` (final public text or an explicit unavailable
+reason, session, round, then verified commit and checks), `initialCompletion`,
+and `publishedBody` (the last acknowledged managed section). New rounds clear
+only the current completion. Older verifying/publishing tasks recover missing
+summaries from their saved sessions; this does not rerun the model. Missing or
+empty successful reports are marked unavailable, while transient reads retry.
+Already completed or closed tasks are not bulk rewritten on upgrade.
+
+Publication reads the PR at the verified head and only replaces the managed HTML
+marker region. Notes outside it are preserved. An exact known legacy body can be
+replaced; unknown unmarked text is retained with the new section appended, since
+it might contain manual edits. A later legacy round may not have enough saved
+information to identify its old acknowledgement exactly.
+
+An edited/removed managed section, changed PR head, closed follow-up PR, or oversized
+body blocks at `publishing`. Preserve your notes outside the markers and restore
+the previous managed section from `publishedBody` in the task checkpoint (or PR
+edit history), then use the normal workflow retry. Do not delete the queue or
+restart implementation just to retry a description update. If a PATCH succeeded
+but its response was lost, matching desired content is accepted without another
+write. Body and head are reread before PATCH; edits after that final read cannot
+be atomically excluded by this implementation.
+
+Each rendered report is limited to 22,000 UTF-8 bytes with an explicit truncation
+notice; full saved text remains in task state and the session. Dispatcher check
+text is limited to 8,000 bytes. The complete description, including retained
+notes and signature, must fit within the automation limit of 60,000 bytes or
+publication blocks without dropping notes. Titles are not regenerated on updates.

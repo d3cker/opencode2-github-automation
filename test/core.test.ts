@@ -30,11 +30,13 @@ function fixture() {
     ensureComment: async () => { events.push("comment"); return 42; },
     findPull: async () => undefined,
     pull: async (_repo, number) => ({ number, html_url: `https://github.com/owner/repo/pull/${number}`, state: "open" }),
+    updatePullBody: async () => {},
     ensurePull: async () => { events.push("pr"); return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; },
   };
   const executor: Executor = {
     selectBase: async (_task, repo) => ({ kind: "branch", branch: repo.baseBranch }),
     hasBranch: async () => true,
+    summary: async t => ({ text: "Implemented counter behavior.", sessionID: t.sessionID, round: t.round }),
     title: async () => "Repair counter increment",
     analyze: async () => { events.push("analyze"); return { kind: "proceed", comment: "Problem and verification plan" }; },
     prepare: async () => { events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; },
@@ -398,7 +400,7 @@ test("PR explicitly reports skipped tests without claiming a pass", async () => 
   };
   const d = f.make(); await d.init(); await d.scan(); await d.tick();
   assert.equal(d.status()[0]?.status, "done");
-  assert.match(body, /Automated tests were not run/);
+  assert.match(body, /No automated test command is configured for the dispatcher/);
   assert.ok(!body.includes("passed"));
 });
 test("closed issue cannot start a fix", async () => {
@@ -886,3 +888,59 @@ test("closure during verification waits for local work and prevents the followin
   assert.equal(d.status()[0]!.status, "closed");
   assert.equal(f.events.includes("push"), false); assert.equal(f.events.includes("pr"), false);
 });
+
+test("completion is persisted before verification, bound to its commit and reused after publication failure", async () => {
+  const f = fixture(); let summaries = 0, body = "", updates = 0;
+  f.executor.summary = async t => { summaries++; return { text: "Delivered the final behavior.", sessionID: t.sessionID, round: t.round }; };
+  f.executor.verify = async () => {
+    assert.equal(f.store.data.tasks[0]?.completion?.text, "Delivered the final behavior.");
+    return { checks: ["unit checks passed"], commit: "verified-sha" };
+  };
+  f.github.ensurePull = async (_repo, _branch, _base, _title, text) => { body = text; return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; };
+  f.github.updatePullBody = async () => { if (++updates === 1) throw new Error("lost update response"); };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.phase, "publishing");
+  assert.equal(d.status()[0]?.completion?.commit, "verified-sha");
+  assert.match(body, /Delivered the final behavior/); assert.doesNotMatch(body, /Problem and verification plan/);
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
+  assert.equal(summaries, 1); assert.equal(restarted.status()[0]?.status, "done");
+  assert.equal(restarted.status()[0]?.publishedBody, body);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
+
+test("follow-up publication keeps the initial report and updates the same PR from the new session only after push", async () => {
+  const f = fixture(); const bodies: string[] = [];
+  f.executor.run = async (t, checkpoint) => { await checkpoint({ sessionID: `ses_round_${t.round ?? 1}` }); };
+  f.executor.summary = async t => ({ text: `Delivered round ${t.round ?? 1}.`, sessionID: t.sessionID, round: t.round });
+  f.github.updatePullBody = async (_r, _n, _commit, _key, body, previous) => {
+    assert.equal(f.events.at(-1), bodies.length ? "push" : "pr");
+    if (bodies.length) assert.equal(previous, bodies[0]);
+    bodies.push(body);
+  };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.github.comments = async () => [{ id: 43, body: "Improve bindings", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.round, 2); assert.equal(d.status()[0]?.status, "done");
+  assert.match(bodies[1]!, /Delivered round 1/); assert.match(bodies[1]!, /Delivered round 2/);
+  assert.match(bodies[1]!, /Latest update — round 2/);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+for (const phase of ["verifying", "publishing"] as const) {
+  test(`legacy ${phase} checkpoint recovers a missing summary without rerunning implementation`, async () => {
+    const f = fixture(), d = f.make(); await d.init(); await d.scan();
+    const t = f.store.data.tasks[0]!;
+    Object.assign(t, { phase, sessionID: "ses_legacy", worktree: "/worktree", baseSha: "base", baseBranch: "main", commit: "sha", checks: ["saved check passed"] });
+    let body = "", reads = 0;
+    f.executor.summary = async () => { reads++; return { unavailable: "The saved completion session is no longer available." }; };
+    f.github.updatePullBody = async (_r, _n, _c, _k, text) => { body = text; };
+    const restarted = f.make(); await restarted.init(); await restarted.tick();
+    assert.equal(restarted.status()[0]?.status, "done"); assert.equal(reads, 1);
+    assert.match(body, /Summary unavailable: The saved completion session is no longer available/);
+    assert.match(body, /Verified commit: sha/);
+    assert.equal(f.events.includes("run"), false);
+    assert.equal(f.events.includes("verify"), phase === "verifying");
+  });
+}

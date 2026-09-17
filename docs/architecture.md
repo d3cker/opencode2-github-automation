@@ -31,10 +31,14 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
 3. Publish a signed acknowledgement, resolve the base branch, and pin that choice.
 4. Create or reuse the task worktree and checkpoint the session identity before
    prompting the executor. The executor must not publish directly.
-5. Validate session success, verify changes, then push and create or reconcile the
-   PR. Generate its title only if creating a PR without an already-saved title.
+5. Validate session success and save the final public completion report. Verify
+   changes, bind the report to the verified commit, then push and create or reconcile
+   the PR with that report and separate dispatcher checks. Generate its title only
+   if creating a PR without an already-saved title.
 6. After publication, process queued authorized issue comments as new rounds on
    the same worktree and branch, with a new main session and the existing open PR.
+   Keep the original PR report and update its Latest update section after pushing;
+   preserve manual notes outside the managed description.
 7. Merge only after eligible approval of the published head, repository permission
    checks, and GitHub merge readiness checks. Post a signed acknowledgement.
 

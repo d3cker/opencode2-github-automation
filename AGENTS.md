@@ -66,7 +66,8 @@ the installation block without making remote writes. Keep its markers intact.
   `src/scheduler.ts` owns interval jobs; `src/state.ts` owns persistence and locks.
 - `src/executor.ts` owns analysis, base selection, worktrees, session execution,
   verification, and pushing. `src/analysis.ts` and `src/branch.ts` validate model
-  decisions. `src/github.ts` implements GitHub calls; `src/approval.ts` evaluates
+  decisions. `src/pr-description.ts` extracts final public reports and renders and
+  reconciles managed PR descriptions. `src/github.ts` implements GitHub calls; `src/approval.ts` evaluates
   approval candidates.
 - `src/runtime.ts`, `src/worker.ts`, and `src/bridge.ts` implement worker hooks,
   runtime installation, and communication with the owner. `src/prompt.ts` loads

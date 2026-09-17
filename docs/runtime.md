@@ -378,6 +378,28 @@ owner location and updated plugin are available there. Live worker/scan diagnost
 reset when the owner is recreated; task checkpoints and scheduler history remain
 durable as before.
 
+## PR descriptions
+
+The PR contains the agent's final completion summary from the successful session,
+with Markdown preserved, followed by dispatcher verification, the issue reference,
+session, round and verified commit. The initial issue acknowledgement is not a
+completion report. Agent-reported tests remain in the summary; the dispatcher
+lists only checks it actually ran. With no configured test command it explicitly
+states that agent-reported tests were not independently rerun.
+
+Follow-up rounds keep the original summary and replace a single **Latest update**
+section after the new commit is pushed. The PR title stays unchanged. Reports are
+saved before publication so a restart or lost GitHub response can reuse them.
+If a legacy session is missing or has no successful final text, the description
+states that its summary is unavailable.
+
+Put manual PR notes outside the `opencode2:pr-body` HTML markers (visible when
+editing the description). Edits inside that section or removal of the markers
+block further description updates to protect your changes. Inspect the task error,
+resolve the conflict and retry publication; see
+[description recovery](advanced.md#pr-description-recovery). Installing an update
+does not automatically rewrite already completed or closed PRs.
+
 ## Interrupted sessions and workflow recovery
 
 If you manually continue a timed-out or interrupted bot session in the TUI,

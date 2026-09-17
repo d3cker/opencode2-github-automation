@@ -323,3 +323,16 @@ test("closing after a checkpoint prevents a late implementation prompt", async (
   await assert.rejects(executor.run(t, async patch => { Object.assign(t, patch); if (patch.promptAttempted) t.status = "closing"; }), /tracking is closed/);
   assert.equal(prompts, 0);
 });
+
+test("legacy publication retrieves the saved final summary without invoking the model and distinguishes missing sessions from transient errors", async () => {
+  let mode = "success";
+  const ctx = { session: {
+    get: async () => { if (mode === "missing") throw { _tag: "SessionNotFoundError" }; if (mode === "network") throw new Error("network"); return { outcome: "succeeded" }; },
+    context: async () => [{ type: "assistant", finish: "stop", content: [{ type: "reasoning", text: "hidden" }, { type: "text", text: "## Summary\n\nDelivered changes." }] }],
+  } } as unknown as Plugin.Context;
+  const e = new OpenCodeExecutor(ctx, options, new AbortController().signal);
+  const t = { ...task(), sessionID: "ses_test", round: 1 };
+  assert.deepEqual(await e.summary(t), { sessionID: "ses_test", round: 1, text: "## Summary\n\nDelivered changes." });
+  mode = "missing"; assert.match((await e.summary(t)).unavailable!, /no longer available/);
+  mode = "network"; await assert.rejects(e.summary(t), /network/);
+});
