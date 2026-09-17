@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { z } from "zod";
 import { type GithubOptions, type Repository, Route, matchRoute } from "./config.js";
 import { GithubError, Issue, Comment, type Pull } from "./github.js";
@@ -15,8 +16,17 @@ export const PendingQuestion = z.object({ id: z.string(), text: z.string(), sess
 const Phase = z.enum(["queued", "analyzing", "commented", "running", "verifying", "publishing", "pr_opened"]);
 export const Task = z.object({
   key: z.string(), repo: z.string(), issue: Issue, route: Route.optional(),
-  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done", "waiting", "closing", "closed"]),
+  phase: Phase, status: z.enum(["ready", "retry_wait", "blocked", "failed", "done", "waiting", "closing", "closed", "cancelling", "watching"]),
   attempts: z.number(), nextAt: z.number(), createdAt: z.number(),
+  controlVersion: z.number().optional(),
+  cancellation: z.object({ requestedAt: z.number(), error: z.string().optional() }).optional(),
+  cancelledRounds: z.array(z.object({ round: z.number(), at: z.number(), sessionID: z.string().optional(),
+    worktree: z.string().optional(), localBranch: z.string().optional(), error: z.string().optional(), attempts: z.number(),
+    question: PendingQuestion.optional(), feedback: z.array(Comment).optional(), commit: z.string().optional(),
+    checks: z.array(z.string()).optional(), completion: CompletionSummary.optional(),
+  })).optional(),
+  localBranch: z.string().optional(),
+  publishedHead: z.object({ commit: z.string(), at: z.number() }).optional(),
   closeRequestedAt: z.number().optional(), closedAt: z.number().optional(), closeError: z.string().optional(),
   analysis: z.string().optional(), commentID: z.number().optional(),
   analysisDecision: AnalysisDecision.optional(),
@@ -49,7 +59,8 @@ export class SessionStopped extends Blocked {}
 export class WaitingForAnswer extends Error {}
 class TaskClosed extends Error {}
 const closing = (task: Task) => task.status === "closing" || task.status === "closed";
-function requireTracked(task: Task) { if (closing(task)) throw new TaskClosed("Task tracking has been closed"); }
+const suspended = (task: Task) => closing(task) || task.status === "cancelling";
+function requireTracked(task: Task) { if (suspended(task)) throw new TaskClosed("Task tracking has been closed"); }
 
 function stoppedSession(task: Task) {
   // Recognize checkpoints from releases before sessionStopped was persisted.
@@ -96,6 +107,7 @@ export class Dispatcher {
   private lastScanFinished?: number;
   private scanError?: string;
   private closures = new Map<string, Promise<void>>();
+  private cancellations = new Map<string, Promise<void>>();
   private publishing = new Set<string>();
   private questionPosts = new Map<string, Promise<number>>();
   constructor(private options: GithubOptions, private store: Store<Queue>, private github: GithubPort, private executor: Executor, private signal: AbortSignal, private secrets: string[] = [], private now = Date.now, private notify: (activity: Activity) => Promise<void> = async () => {}) {}
@@ -104,7 +116,7 @@ export class Dispatcher {
   activity() { return this.queue.tasks.map(activityOf); }
   monitor(): DispatcherMonitor {
     return { ownerDirectory: this.options.ownerDirectory,
-      worker: this.signal.aborted ? "stopped" : this.maintenance || this.queue.tasks.some(t => t.status === "closing") ? "maintenance" : this.workerState,
+      worker: this.signal.aborted ? "stopped" : this.maintenance || this.queue.tasks.some(t => ["closing", "cancelling"].includes(t.status)) ? "maintenance" : this.workerState,
       scanning: Boolean(this.scanning), tasks: this.activity(),
       ...(this.activeTask ? { activeTask: this.activeTask } : {}),
       ...(this.lastScanStarted !== undefined ? { lastScanStarted: this.lastScanStarted } : {}),
@@ -139,16 +151,16 @@ export class Dispatcher {
     for (const repo of this.options.repositories) {
       // Watch PR state independently of automatic merging, issue state, and
       // worker progress so manual closure/merge also reaches attached TUIs.
-      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && !closing(t) && t.pr && !t.merged)) {
-        if (closing(task)) continue;
+      for (const task of this.queue.tasks.filter(t => t.repo === repo.repo && !suspended(t) && t.pr && !t.merged)) {
+        if (suspended(task)) continue;
         try {
           const pr = await this.github.pull(repo.repo, task.pr!.number);
           const merged = pr.merged === true || Boolean(pr.merged_at);
           if (pr.state !== task.pr!.state || merged) await this.update(task, { pr, ...(merged ? { merged: true } : {}) });
-        } catch (error) { if (!closing(task)) throw error; }
+        } catch (error) { if (!suspended(task)) throw error; }
       }
       const issues = await this.github.issues(repo.repo);
-      for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo && !closing(t))) {
+      for (const tracked of this.queue.tasks.filter(t => t.repo === repo.repo && !suspended(t))) {
         if (!issues.some(i => i.number === tracked.issue.number)) issues.push(await this.github.issue(repo.repo, tracked.issue.number));
       }
       for (const issue of issues) {
@@ -156,7 +168,7 @@ export class Dispatcher {
         if (issue.pull_request) { ignored++; continue; }
         const key = `${repo.repo.toLowerCase()}#${issue.number}`;
         const existing = this.queue.tasks.find(t => t.key === key);
-        if (existing && closing(existing)) { ignored++; continue; }
+        if (existing && suspended(existing)) { ignored++; continue; }
         if (!existing && issue.state !== "open") { ignored++; continue; }
         const comments = await this.github.comments(repo.repo, issue.number);
         // A person may share the posting account with the bot. Exclude marked
@@ -166,9 +178,9 @@ export class Dispatcher {
         if (existing) {
           // For queues from older versions, comments after the bot's acknowledgement are new feedback.
           await this.serial.run(async () => {
-            if (closing(existing)) return;
+            if (suspended(existing)) return;
             const previousCursor = existing.commentCursor ?? existing.commentID ?? 0;
-            const fresh = authorized.filter(c => c.id > previousCursor);
+            const fresh = authorized.filter(c => c.id > previousCursor && !existing.cancelledRounds?.some(r => r.question?.permission && [`/allow ${r.question.id}`, `/deny ${r.question.id}`].includes(c.body.trim())));
             let remaining = fresh;
             const q = existing.question;
             if (q && !q.answer && q.commentID && issue.state === "open") {
@@ -213,10 +225,11 @@ export class Dispatcher {
   }
   private authorized(login: string, authors: string[]) { return authors.some(a => a.toLowerCase() === login.toLowerCase()); }
   tick(): Promise<void> {
+    for (const task of this.queue.tasks.filter(t => t.status === "cancelling" && t.nextAt <= this.now())) this.startCancelling(task);
     for (const task of this.queue.tasks.filter(t => t.status === "closing" && t.nextAt <= this.now())) this.startClosing(task);
     if (this.maintenance) return Promise.resolve();
     if (this.working) return this.working;
-    if (this.queue.tasks.some(t => t.status === "closing")) return Promise.resolve();
+    if (this.queue.tasks.some(t => ["closing", "cancelling"].includes(t.status))) return Promise.resolve();
     this.workerState = "reconciling";
     this.working = this.workOnce().catch(error => { if (!(error instanceof TaskClosed)) throw error; }).finally(() => { this.working = undefined; this.workerState = "idle"; this.activeTask = undefined; });
     return this.working;
@@ -245,9 +258,14 @@ export class Dispatcher {
       catch (error) { if (this.signal.aborted) return; await this.update(pending, { error: redact(error, this.secrets), nextAt: this.now() + 60_000 }); }
     }
     await this.serial.run(async () => {
-      const finished = this.queue.tasks.find(t => t.status === "done" && t.pendingFeedback?.length);
+      const finished = this.queue.tasks.find(t => ["done", "watching"].includes(t.status) && t.pendingFeedback?.length);
       if (!finished) return;
-      Object.assign(finished, { round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
+      const afterCancellation = finished.status === "watching";
+      if (finished.status === "done" && finished.commit && finished.publishedAt) finished.publishedHead = { commit: finished.commit, at: finished.publishedAt };
+      Object.assign(finished, { ...(afterCancellation ? {
+        localBranch: `automation/resume-${createHash("sha256").update(finished.key).digest("hex").slice(0, 12)}-r${(finished.round ?? 1) + 1}`,
+        worktree: undefined,
+      } : {}), round: (finished.round ?? 1) + 1, feedback: finished.pendingFeedback, pendingFeedback: [], previousSessionID: finished.sessionID,
         phase: "queued", status: "ready", attempts: 0, nextAt: this.now(), analysis: undefined, commentID: undefined,
         analysisDecision: undefined, analysisDialogue: undefined, question: undefined,
         sessionID: undefined, sessionReady: false, promptAttempted: false, sessionStopped: undefined, recovery: undefined, completion: undefined, checks: undefined, commit: undefined, error: undefined });
@@ -267,17 +285,27 @@ export class Dispatcher {
       if (!repo) throw new Blocked("Repository removed from configuration");
       if (!task.route) throw new Blocked("No unambiguous execution route");
       await this.update(task, { status: "ready", error: undefined });
-      const followup = (task.round ?? 1) > 1;
+      // A cancelled publication may have created its PR before losing the
+      // response/checkpoint. Reconcile it before choosing a clean resume base.
+      if (task.cancelledRounds?.length && !task.pr && ["queued", "analyzing", "commented"].includes(task.phase)) {
+        const pr = await this.github.findPull(task.repo, task.branch);
+        if (pr) await this.update(task, { pr });
+        else await this.update(task, { initialCompletion: undefined, publishedBody: undefined, prTitle: undefined, publishedHead: undefined });
+      }
+      const laterRound = (task.round ?? 1) > 1;
+      const followup = Boolean(task.pr) || laterRound && !task.cancelledRounds?.length;
       if (["queued", "analyzing", "commented"].includes(task.phase)) {
         const latest = await this.github.issue(task.repo, task.issue.number);
         if (latest.state !== "open") throw new Blocked("Issue is closed; reopen it before continuing");
         if (followup) {
           const pr = await this.github.findPull(task.repo, task.branch);
           if (!pr || pr.state !== "open") throw new Blocked("The original PR is closed or merged; reopen it or create a new issue");
-          if (!task.feedback?.every(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors))) throw new Blocked("Feedback author no longer authorized");
+        }
+        if (laterRound) {
+          if (!task.feedback?.length || !task.feedback.every(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors))) throw new Blocked("Feedback author no longer authorized");
         } else if (task.source !== "comment" && !this.authorized(latest.user.login, repo.allowedAuthors)) throw new Blocked("Issue author no longer authorized");
-        if (!followup && task.source === "comment" && !task.feedback?.some(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors) && matchRoute(c.body, this.options.routes))) throw new Blocked("No authorized routing comment remains in the task");
-        const route = followup || task.source === "comment" ? task.route : matchRoute(latest.body ?? "", this.options.routes);
+        if (!laterRound && task.source === "comment" && !task.feedback?.some(c => this.authorized(c.user.login, configuredRepo!.allowedAuthors) && matchRoute(c.body, this.options.routes))) throw new Blocked("No authorized routing comment remains in the task");
+        const route = laterRound || task.source === "comment" ? task.route : matchRoute(latest.body ?? "", this.options.routes);
         if (!route) throw new Blocked("Routing tag removed");
         if (task.analysis && (latest.body !== task.issue.body || latest.title !== task.issue.title || JSON.stringify(route) !== JSON.stringify(task.route))) throw new Blocked("Issue or route changed after analysis; review before restarting");
         await this.update(task, { issue: latest, route });
@@ -338,10 +366,10 @@ export class Dispatcher {
           const legacy = `${task.analysis}\n\nCloses #${task.issue.number}\n\nChecks:\n${task.checks?.length ? task.checks.map(c => `- ${c}`).join("\n") : "- Automated tests were not run: no test command configured. Only Git consistency checks were performed."}\n\nOpenCode session: ${task.sessionID}\nCommit: ${task.commit}`;
           await this.github.updatePullBody(task.repo, pr.number, task.commit!, task.key, body, task.publishedBody, legacy);
         }
-        await this.update(task, { publishedBody: pr.state === "open" ? body : task.publishedBody, pr, publishedAt: this.now(), phase: "pr_opened", status: "done", attempts: 0 });
+        await this.update(task, { publishedBody: pr.state === "open" ? body : task.publishedBody, pr, publishedAt: this.now(), publishedHead: { commit: task.commit!, at: this.now() }, phase: "pr_opened", status: "done", attempts: 0 });
       }
     } catch (error) {
-      if (this.signal.aborted || closing(task) || error instanceof TaskClosed) return;
+      if (this.signal.aborted || suspended(task) || error instanceof TaskClosed) return;
       if (error instanceof WaitingForAnswer) { await this.update(task, { status: task.question?.answer ? "ready" : "waiting", error: undefined }); return; }
       const attempts = task.attempts + 1;
       const blocked = error instanceof Blocked || error instanceof DescriptionConflict || error instanceof GithubError && [401, 404, 422].includes(error.status);
@@ -410,22 +438,23 @@ export class Dispatcher {
   private async mergeOnce() {
     if (!this.options.autoMerge.enabled || !this.github.mergeApproved) return;
     for (const task of this.queue.tasks) {
-      if (task.status !== "done" || !task.pr || task.pr.state === "closed" || !task.commit || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
+      const head = task.status === "watching" ? task.publishedHead : task.commit ? { commit: task.commit, at: task.publishedAt } : undefined;
+      if (!["done", "watching"].includes(task.status) || !task.pr || task.pr.state === "closed" || !head || task.merged || task.pendingFeedback?.length || (task.mergeNextAt ?? 0) > this.now()) continue;
       const repo = this.options.repositories.find(r => r.repo === task.repo);
       if (!repo) continue;
       // Older queues start watching now; historical approvals must not trigger an unexpected merge.
-      if (!task.publishedAt) { await this.update(task, { publishedAt: this.now() }); continue; }
+      if (!head.at) { await this.update(task, { publishedAt: this.now() }); continue; }
       try {
         await this.scan(); // Pick up issue feedback before considering a completed task for merge.
-        if (closing(task) || task.pendingFeedback?.length || task.pr.state === "closed") continue;
+        if (suspended(task) || task.pendingFeedback?.length || task.pr.state === "closed") continue;
         this.publishing.add(task.key);
-        const merged = await this.github.mergeApproved(task.repo, task.pr.number, task.commit, task.publishedAt, repo.allowedAuthors, this.options.autoMerge);
+        const merged = await this.github.mergeApproved(task.repo, task.pr.number, head.commit, head.at, repo.allowedAuthors, this.options.autoMerge);
         if (merged) {
           await this.github.ensureComment(task.repo, task.pr.number, `<!-- opencode2:${task.key}:merged -->`, "Pull request merged.");
           await this.update(task, { merged: true, pr: { ...task.pr, state: "closed" }, mergeError: undefined });
         } else await this.update(task, { mergeError: undefined, mergeNextAt: this.now() + 60_000 });
       } catch (error) {
-        if (this.signal.aborted) return;
+        if (this.signal.aborted || suspended(task)) return;
         await this.update(task, { mergeError: redact(error, this.secrets), mergeNextAt: Math.max(this.now() + 60_000, error instanceof GithubError ? error.retryAt ?? 0 : 0) });
       }
       finally { this.publishing.delete(task.key); }
@@ -433,7 +462,7 @@ export class Dispatcher {
   }
   runtime(sessionID: string) {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID || t.helpers?.some(h => h.id === sessionID && h.parentID === t.sessionID));
-    if (!task || closing(task)) return null;
+    if (!task || suspended(task) || task.status === "watching") return null;
     const result = JSON.parse(JSON.stringify(task)) as Task;
     const matching = Object.values(this.options.routes).filter(r => r.agent === task.route?.agent && r.model.id === task.route?.model.id && r.model.providerID === task.route?.model.providerID);
     const configured = matching.length === 1 ? matching[0] : undefined;
@@ -473,7 +502,7 @@ export class Dispatcher {
   }
   async helper(sessionID: string, callID: string, capability: "vision" | "audio") {
     const task = this.queue.tasks.find(t => t.sessionID === sessionID);
-    if (!task || closing(task) || task.phase !== "running" || task.question && !task.question.delivered) throw new Error("No active main bot session available for delegation");
+    if (!task || suspended(task) || task.status === "watching" || task.phase !== "running" || task.question && !task.question.delivered) throw new Error("No active main bot session available for delegation");
     const id = `ses_${createHash("sha256").update(`${sessionID}:${callID}`).digest("hex").slice(0, 32)}`;
     await this.serial.run(async () => {
       requireTracked(task);
@@ -493,7 +522,8 @@ export class Dispatcher {
       this.signal.throwIfAborted();
       const task = this.queue.tasks.find(t => t.key === key);
       if (!task) throw new Error("Task not found in this project");
-      if (closing(task)) throw new Error("Task tracking is closed; inspect its saved session or create a new issue");
+      if (closing(task)) throw new Error("Task tracking is closed; use Resume issue tracking to watch future comments.");
+      if (task.status === "cancelling") throw new Error("Wait for round cancellation to finish.");
       if (task.question && !task.question.delivered) throw new Error("Answer the pending question or permission request in the GitHub issue first");
       if (task.merged || task.pr?.state === "closed") throw new Error("The original PR is closed or merged; reopen it or create a new issue");
       if (!["blocked", "failed"].includes(task.status)) return false;
@@ -527,8 +557,9 @@ export class Dispatcher {
       const task = this.queue.tasks.find(t => t.key === key);
       if (!task) throw new Error("Task not found in this project");
       if (task.status === "closed") return undefined;
+      if (task.status === "cancelling") throw new Error("Round cancellation is still in progress; wait before ending tracking.");
       if (this.publishing.has(key)) throw new Error("Publication or merge is already in flight. Wait for it to finish, then close the task.");
-      Object.assign(task, { status: "closing", closeRequestedAt: task.closeRequestedAt ?? this.now(), closeError: undefined, nextAt: this.now() });
+      Object.assign(task, { controlVersion: (task.controlVersion ?? 0) + 1, status: "closing", closeRequestedAt: task.closeRequestedAt ?? this.now(), closeError: undefined, nextAt: this.now() });
       await this.store.save(this.queue);
       return task;
     });
@@ -565,5 +596,74 @@ export class Dispatcher {
     })().catch(error => console.error("Task closure failed", redact(error, this.secrets))).finally(() => this.closures.delete(task.key));
     this.closures.set(task.key, operation);
   }
-  async settle() { await Promise.allSettled([this.scanning, this.working, this.maintenance, ...this.closures.values()]); }
+  async cancelRound(key: string, resumeTracking = false) {
+    // Reopening tracking explicitly ignores the backlog accumulated while closed.
+    // Read it before changing state; failed validation leaves the closed task intact.
+    const found = this.queue.tasks.find(t => t.key === key);
+    if (!found) throw new Error("Task not found in this project");
+    let cursor: number | undefined;
+    if (resumeTracking) {
+      if (found.status !== "closed") return false;
+      if ((await this.github.issue(found.repo, found.issue.number)).state !== "open") throw new Error("Reopen the GitHub issue before resuming tracking.");
+      if (found.pr && (await this.github.pull(found.repo, found.pr.number)).state !== "open") throw new Error("The PR is no longer open; tracking was not resumed.");
+      cursor = Math.max(found.commentCursor ?? 0, ...(await this.github.comments(found.repo, found.issue.number)).map(c => c.id));
+    }
+    const task = await this.serial.run(async () => {
+      this.signal.throwIfAborted();
+      if (resumeTracking && found.status !== "closed") return undefined;
+      if (!resumeTracking && ["done", "watching"].includes(found.status)) return undefined;
+      if (!resumeTracking && closing(found)) throw new Error("Task tracking is closed. Use Resume issue tracking to watch future comments without replaying this round.");
+      if (this.publishing.has(key)) throw new Error("Publication or merge is already in flight. Wait before cancelling; remote effects cannot be rolled back.");
+      if (found.status !== "cancelling") {
+        Object.assign(found, { status: "cancelling", controlVersion: (found.controlVersion ?? 0) + 1,
+          cancellation: { requestedAt: this.now() }, nextAt: this.now(),
+          ...(cursor !== undefined ? { commentCursor: cursor, pendingFeedback: [] } : {}),
+        });
+        await this.store.save(this.queue);
+      }
+      return found;
+    });
+    if (!task) return false;
+    await this.notify(activityOf(task)).catch(() => {});
+    this.startCancelling(task);
+    return true;
+  }
+  private startCancelling(task: Task) {
+    if (this.cancellations.has(task.key) || this.signal.aborted) return;
+    const work = this.activeTask === task.key ? this.working : undefined;
+    const operation = (async () => {
+      try {
+        await this.executor.cancel(task, true);
+        await work;
+        await Promise.allSettled([...this.questionPosts].filter(([key]) => key.startsWith(`<!-- opencode2:${task.key}:`)).map(([, post]) => post));
+        await this.executor.cancel(task, true);
+        await this.serial.run(async () => {
+          this.signal.throwIfAborted();
+          const archived = { round: task.round ?? 1, at: this.now(), sessionID: task.sessionID,
+            worktree: task.worktree ?? join(this.options.stateDirectory, "worktrees", (task.localBranch ?? task.branch).replaceAll("/", "-")),
+            localBranch: task.localBranch ?? task.branch, error: task.error, attempts: task.attempts,
+            question: task.question, feedback: task.feedback, commit: task.commit, checks: task.checks, completion: task.completion };
+          const next: Task = { ...task, cancelledRounds: [...task.cancelledRounds ?? [], archived], status: "watching",
+            cancellation: undefined, error: undefined, attempts: 0, mergeError: undefined,
+            recovery: undefined, sessionStopped: undefined, question: undefined,
+            closeRequestedAt: undefined, closedAt: undefined, closeError: undefined,
+          };
+          // Keep the live task cancelling until its final state is durable.
+          // A failed save can then retry without duplicate archive entries.
+          await this.store.save({ ...this.queue, tasks: this.queue.tasks.map(t => t === task ? next : t) });
+          Object.assign(task, next);
+        });
+      } catch (error) {
+        if (this.signal.aborted) return;
+        await this.serial.run(async () => {
+          task.cancellation = { requestedAt: task.cancellation?.requestedAt ?? this.now(), error: redact(error, this.secrets) };
+          task.nextAt = this.now() + 30_000;
+          await this.store.save(this.queue);
+        });
+      }
+      await this.notify(activityOf(task)).catch(() => {});
+    })().catch(error => console.error("Round cancellation failed", redact(error, this.secrets))).finally(() => this.cancellations.delete(task.key));
+    this.cancellations.set(task.key, operation);
+  }
+  async settle() { await Promise.allSettled([this.scanning, this.working, this.maintenance, ...this.closures.values(), ...this.cancellations.values()]); }
 }
