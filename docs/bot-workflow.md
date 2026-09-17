@@ -201,6 +201,8 @@ flowchart TD
     V -->|Failed check or Git consistency guard| VB[verifying / blocked]
     VB -->|Operator retries saved stage| V
     P --> Done[pr_opened / done with PR and publishedAt]
+    P -->|Branch matches, PR head not yet updated| Lag[publishing / retry_wait within attempt limit]
+    Lag -->|Backoff elapsed, reuse saved push| P
     P -->|Publication failure| PB[Retain publishing phase and apply error policy]
     PB -->|Eligible retry| P
     Done -->|Pending authorized feedback| Round[Increment round, move feedback and reset per-round state]
@@ -449,7 +451,9 @@ flowchart TD
     Find --> Follow{Follow-up round?}
     Follow -->|Yes| Open{Existing PR open?}
     Open -->|No| Block
-    Open -->|Yes| Push[Validate origin, workspace, saved HEAD and clean tree, push exact SHA]
+    Open -->|Yes| Pushed{Saved pushedCommit matches verified SHA?}
+    Pushed -->|Yes| Description
+    Pushed -->|No| Push[Validate origin, workspace, saved HEAD and clean tree, push exact SHA]
     Follow -->|No| Exists{PR already exists?}
     Exists -->|Yes| Closed{PR closed?}
     Closed -->|Yes| Done[Record PR and publication time, pr_opened / done]
@@ -457,11 +461,17 @@ flowchart TD
     Exists -->|No| Title[Generate title only if no saved prTitle]
     Title --> Issue{Issue still open?}
     Issue -->|No| Block
-    Issue -->|Yes| PushNew[Validate origin and workspace, push exact verified SHA]
-    PushNew --> Create[Create or reconcile signed PR against pinned base]
-    Create --> Description[Read open PR at verified SHA, reconcile managed description]
-    Push --> Description
-    Description -->|Edited managed block, changed head or oversized body| Block
+    Issue -->|Yes| NewPushed{Saved pushedCommit matches verified SHA?}
+    NewPushed -->|Yes| Create
+    NewPushed -->|No| PushNew[Validate origin and workspace, push exact verified SHA]
+    PushNew --> SaveNew[Persist pushedCommit]
+    SaveNew --> Create[Create or reconcile signed PR against pinned base]
+    Create --> Description[Read open PR and remote branch, reconcile managed description]
+    Push --> SavePush[Persist pushedCommit]
+    SavePush --> Description
+    Description -->|Branch matches, PR head differs| Pending[Retry saved publication with backoff and attempt limit]
+    Pending --> Retry
+    Description -->|Closed PR, changed branch, edited managed block or oversized body| Block
     Description -->|Unchanged or update succeeds| Acknowledge[Persist published body checkpoint]
     Acknowledge --> Done
     Failure[Other command, model or transport error] --> Policy[Keep current phase and apply retry policy in section 8]
@@ -473,9 +483,11 @@ flowchart TD
 ```
 
 Resuming `running` validates the saved session first; retrying `verifying` runs
-checks again. Retrying `publishing` uses the saved verified SHA and requires the
-worktree still to match it, rather than rerunning checks implicitly. An already
-pushed branch does not by itself make a task complete.
+checks again. Retrying `publishing` uses the saved verified SHA without rerunning
+checks implicitly. If a push is still required, the worktree must still match
+that SHA. After a checkpointed push, description reconciliation checks GitHub's
+branch and PR instead; it does not publish later local edits. An already pushed
+branch does not by itself make a task complete.
 
 The configured checks are command argument arrays. A failing configured check
 produces `blocked`. With no configured checks, only Git consistency checks run;
@@ -498,8 +510,20 @@ follow-ups. Dispatcher checks appear separately from agent-reported tests, follo
 by `Closes #N`, session, round and verified commit. Push uses
 `COMMIT:refs/heads/TASK_BRANCH` without force. The first publication reconciles an
 existing branch PR without another push; follow-ups require an open PR and push
-the new verified commit before updating its description. The title is retained.
+the new verified commit before updating its description. A successful push saves
+`pushedCommit`; retries skip that push when it matches the verified SHA, including
+after an owner restart. New rounds clear this checkpoint. If push succeeded but
+its response or checkpoint was lost, normal non-force push reconciliation still
+applies. The title is retained.
 An already closed first-round PR is recorded without editing its description.
+
+Before reconciling the description and again before PATCH, compare the remote
+branch ref with the verified SHA. If the branch matches but the PR head is stale,
+`PullHeadPending` uses the normal backoff and `maxAttempts` policy at `publishing`.
+It does not rerun implementation, verification, or a checkpointed push. A closed
+PR or different branch SHA blocks with a distinct error; a stale PR view is not
+permission to overwrite a changed branch. The guard also checks the branch when
+the PR view already reports the expected SHA.
 
 A stable HTML marker pair encloses the bot-managed description. Notes outside
 it are preserved; an edited or removed managed section blocks publication rather
@@ -666,9 +690,9 @@ flowchart TD
     Result -->|WaitingForAnswer| Wait[waiting, or ready if answer already arrived]
     Result -->|SessionStopped| Stop[running / blocked, sessionStopped true]
     Result -->|Other Blocked, description conflict or GitHub 401, 404, 422| Block[blocked at saved phase]
-    Result -->|Other failure below attempt limit| Retry[retry_wait at saved phase]
+    Result -->|PR head propagation or other failure below attempt limit| Retry[retry_wait at saved phase]
     Retry -->|nextAt elapsed| Work
-    Result -->|Other failure at limit| Fail[failed at saved phase]
+    Result -->|PR head propagation or other failure at limit| Fail[failed at saved phase]
     Stop --> Probe[On available worker pass, probe due saved session without unresolved question]
     Legacy[Recognized legacy timeout or outcome block] --> Probe
     Probe --> Complete{Matching location and task marker, succeeded outcome and valid final assistant?}

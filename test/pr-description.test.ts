@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { finalReport, renderDescription, mergeDescription, descriptionMarkers, assertDescriptionSize, DescriptionConflict } from "../src/pr-description.js";
-import { Github } from "../src/github.js";
+import { Github, PullHeadPending } from "../src/github.js";
 
 const key = "owner/repo#1";
 const first = { sessionID: "ses_first", round: 1, text: "## Summary\n\nImplemented **controls**.\n\n24/24 tests passed.", commit: "one", checks: ["npm test — passed"] };
@@ -59,21 +59,25 @@ test("long reports are bounded and marked as truncated without exposing manageme
 });
 
 function githubFixture() {
-  let body = `Notes above\n${original}\nNotes below`, sha = "two", state = "open", lost = false, concurrent = false, reads = 0;
+  let body = `Notes above\n${original}\nNotes below`, sha = "two", branch = "two", state = "open", lost = false, concurrent = false, reads = 0;
+  let onSecondRead = () => {};
   const patches: Record<string, unknown>[] = [];
   const fetcher: typeof fetch = async (url, init) => {
     if (String(url).endsWith("/user")) return Response.json({ login: "bot" });
+    if (String(url).endsWith("/git/ref/heads/automation%2Fissue-1")) return Response.json({ object: { sha: branch } });
     if (init?.method === "PATCH") {
       const patch = JSON.parse(String(init.body)); patches.push(patch); body = patch.body;
       if (lost) { lost = false; throw new Error("lost response after PATCH"); }
       return Response.json({});
     }
     reads++;
+    if (reads === 2) onSecondRead();
     if (concurrent && reads === 2) body += "\nConcurrent note";
-    return Response.json({ body, state, head: { sha } });
+    return Response.json({ body, state, head: { sha, ref: "automation/issue-1" } });
   };
   return { github: new Github("token", new AbortController().signal, fetcher), patches, body: () => body,
-    lose: () => { lost = true; }, race: () => { concurrent = true; }, head: (value: string) => { sha = value; }, close: () => { state = "closed"; } };
+    lose: () => { lost = true; }, race: () => { concurrent = true; }, head: (value: string) => { sha = value; },
+    branch: (value: string) => { branch = value; }, secondRead: (fn: () => void) => { onSecondRead = fn; }, close: () => { state = "closed"; } };
 }
 
 test("GitHub description reconciliation retries a lost PATCH response without changing title or manual notes", async () => {
@@ -84,11 +88,35 @@ test("GitHub description reconciliation retries a lost PATCH response without ch
   assert.equal(f.body(), `Notes above\n${updated}\nNotes below`);
 });
 
-test("GitHub refuses stale heads, closed PRs and a detected concurrent description edit", async () => {
+test("GitHub refuses changed branches, closed PRs and a detected concurrent description edit", async () => {
   for (const scenario of ["head", "closed", "race"]) {
     const f = githubFixture();
-    if (scenario === "head") f.head("unexpected"); else if (scenario === "closed") f.close(); else f.race();
+    if (scenario === "head") f.branch("unexpected"); else if (scenario === "closed") f.close(); else f.race();
     await assert.rejects(f.github.updatePullBody("owner/repo", 2, "two", key, updated, original), DescriptionConflict);
+    assert.equal(f.patches.length, 0);
+  }
+});
+
+test("a lagging PR head retries only while the remote branch matches the verified commit", async () => {
+  const f = githubFixture(); f.head("one");
+  await assert.rejects(f.github.updatePullBody("owner/repo", 2, "two", key, updated, original), error => {
+    assert.ok(error instanceof PullHeadPending);
+    assert.match(error.message, /reflect pushed commit two/); assert.match(error.message, /reports one/);
+    return true;
+  });
+  assert.equal(f.patches.length, 0);
+  f.head("two");
+  await f.github.updatePullBody("owner/repo", 2, "two", key, updated, original);
+  assert.equal(f.patches.length, 1); assert.equal(f.body(), `Notes above\n${updated}\nNotes below`);
+});
+
+test("both PR and branch checks run again before PATCH without confusing real conflicts with propagation", async () => {
+  for (const scenario of ["lag", "branch", "closed"]) {
+    const f = githubFixture();
+    f.secondRead(() => {
+      if (scenario === "lag") f.head("one"); else if (scenario === "branch") f.branch("someone-else"); else f.close();
+    });
+    await assert.rejects(f.github.updatePullBody("owner/repo", 2, "two", key, updated, original), scenario === "lag" ? PullHeadPending : DescriptionConflict);
     assert.equal(f.patches.length, 0);
   }
 });

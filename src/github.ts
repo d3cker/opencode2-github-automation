@@ -16,6 +16,7 @@ export type Pull = z.infer<typeof Pull>;
 export class GithubError extends Error {
   constructor(readonly status: number, readonly retryAt?: number) { super(`GitHub HTTP ${status}`); }
 }
+export class PullHeadPending extends Error {}
 export class Github {
   private login?: string;
   constructor(private token: string, private signal: AbortSignal, private fetcher: typeof fetch = fetch, private signature?: string) {}
@@ -71,10 +72,17 @@ export class Github {
     return Pull.parse(await this.request(`/repos/${repo}/pulls`, "POST", { head: branch, base, title, body: signed }));
   }
   async updatePullBody(repo: string, number: number, commit: string, key: string, body: string, previous?: string, legacy?: string) {
-    const schema = z.object({ state: z.string(), head: z.object({ sha: z.string() }), body: z.string().nullable() });
+    const schema = z.object({ state: z.string(), head: z.object({ sha: z.string(), ref: z.string() }), body: z.string().nullable() });
     const read = async () => schema.parse(await this.request(`/repos/${repo}/pulls/${number}`));
+    const requireHead = async (pr: z.infer<typeof schema>) => {
+      if (pr.state !== "open") throw new DescriptionConflict(`PR #${number} is closed. Inspect it before retrying publication.`);
+      const ref = z.object({ object: z.object({ sha: z.string() }) }).parse(
+        await this.request(`/repos/${repo}/git/ref/heads/${encodeURIComponent(pr.head.ref)}`));
+      if (ref.object.sha !== commit) throw new DescriptionConflict(`PR #${number} branch changed: expected ${commit}, found ${ref.object.sha}. Inspect it before retrying publication.`);
+      if (pr.head.sha !== commit) throw new PullHeadPending(`Waiting for GitHub PR #${number} to reflect pushed commit ${commit}; its branch matches, but the PR reports ${pr.head.sha}. Publication will retry automatically within the configured attempt limit.`);
+    };
     const current = await read();
-    if (current.state !== "open" || current.head.sha !== commit) throw new DescriptionConflict("PR is closed or its head differs from the verified commit. Inspect it before retrying publication.");
+    await requireHead(current);
     const signedLegacy = legacy === undefined ? undefined : await this.signed(legacy);
     let next = mergeDescription(current.body ?? "", key, body, previous, signedLegacy);
     // Sign a new body or an exact legacy replacement; retain existing signatures elsewhere.
@@ -82,7 +90,8 @@ export class Github {
     assertDescriptionSize(next);
     if (next === current.body) return;
     const fresh = await read();
-    if (fresh.state !== "open" || fresh.head.sha !== commit || fresh.body !== current.body) throw new DescriptionConflict("PR changed while its description was being prepared. Retry after inspecting concurrent edits.");
+    await requireHead(fresh);
+    if (fresh.body !== current.body) throw new DescriptionConflict("PR description changed while its update was being prepared. Retry after inspecting concurrent edits.");
     await this.request(`/repos/${repo}/pulls/${number}`, "PATCH", { body: next });
   }
   async mergeApproved(repo: string, number: number, commit: string, since: number, authors: string[], options: GithubOptions["autoMerge"]): Promise<boolean> {

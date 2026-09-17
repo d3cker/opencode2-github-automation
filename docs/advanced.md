@@ -239,8 +239,10 @@ The monitor reports task maintenance until closure completes.
 
 Task state stores `completion` (final public text or an explicit unavailable
 reason, session, round, then verified commit and checks), `initialCompletion`,
-and `publishedBody` (the last acknowledged managed section). New rounds clear
-only the current completion. Older verifying/publishing tasks recover missing
+`publishedBody` (the last acknowledged managed section), and `pushedCommit` (the
+successfully pushed verified SHA). New rounds clear the current completion and
+push checkpoint while retaining the original report and published body.
+Older verifying/publishing tasks recover missing
 summaries from their saved sessions; this does not rerun the model. Missing or
 empty successful reports are marked unavailable, while transient reads retry.
 Already completed or closed tasks are not bulk rewritten on upgrade.
@@ -251,13 +253,22 @@ replaced; unknown unmarked text is retained with the new section appended, since
 it might contain manual edits. A later legacy round may not have enough saved
 information to identify its old acknowledgement exactly.
 
-An edited/removed managed section, changed PR head, closed follow-up PR, or oversized
+After push, GitHub's PR head can temporarily lag behind its branch ref. Before
+description reconciliation and again before PATCH, the plugin reads the remote
+branch ref. If it matches the verified SHA but the PR head does not, publication
+enters `retry_wait` and retries with the normal backoff, up to `maxAttempts`.
+Retries reuse the saved report and verified commit, skipping a push already
+recorded in `pushedCommit`, including after a restart. Exhausted retries become
+`failed`; inspect the reported SHAs and use `/restartworkflow` after resolving the
+problem. An unacknowledged push still uses normal non-force push reconciliation.
+
+An edited/removed managed section, changed remote branch, closed follow-up PR, or oversized
 body blocks at `publishing`. Preserve your notes outside the markers and restore
 the previous managed section from `publishedBody` in the task checkpoint (or PR
 edit history), then use the normal workflow retry. Do not delete the queue or
 restart implementation just to retry a description update. If a PATCH succeeded
 but its response was lost, matching desired content is accepted without another
-write. Body and head are reread before PATCH; edits after that final read cannot
+write. Body, PR head and branch ref are reread before PATCH; edits after those reads cannot
 be atomically excluded by this implementation.
 
 Each rendered report is limited to 22,000 UTF-8 bytes with an explicit truncation

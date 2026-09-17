@@ -35,6 +35,8 @@ loads a generic scheduler, a GitHub dispatcher, and a terminal UI component.
    changes, bind the report to the verified commit, then push and create or reconcile
    the PR with that report and separate dispatcher checks. Generate its title only
    if creating a PR without an already-saved title.
+   Checkpoint successful pushes. Retry a lagging PR head only while the remote
+   branch matches the verified commit; block actual branch changes or closure.
 6. After publication, process queued authorized issue comments as new rounds on
    the same worktree and branch, with a new main session and the existing open PR.
    After cancellation, use a fresh local branch/worktree from the published head,

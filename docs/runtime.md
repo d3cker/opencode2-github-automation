@@ -431,6 +431,14 @@ durable as before.
 
 ## PR descriptions
 
+After pushing a verified commit, GitHub may briefly show the previous commit in
+the PR. If the remote branch already matches the verified commit, the bot waits
+and automatically retries publication within its configured attempt limit. It
+keeps the saved report and does not repeat implementation or a checkpointed push.
+A changed remote branch or closed PR produces a separate blocking error. If the
+propagation retries are exhausted, inspect the error and use `/restartworkflow`;
+see [description recovery](advanced.md#pr-description-recovery).
+
 The PR contains the agent's final completion summary from the successful session,
 with Markdown preserved, followed by dispatcher verification, the issue reference,
 session, round and verified commit. The initial issue acknowledgement is not a
