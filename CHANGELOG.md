@@ -8,6 +8,8 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.6
+
 ### Documentation
 
 - Align all eight bot workflow diagrams and runtime/recovery references with the
