@@ -18,11 +18,11 @@ try {
   const [archive] = JSON.parse(packed.stdout);
   assert.equal(archive.version, pkg.version, "Packed version must match package.json");
   assert.equal(archive.filename, basename(archive.filename), "Archive name must not contain a directory");
-  for (const required of ["dist/index.js", "dist/tui.js", "dist/setup.js", "dist/install.js", "scripts/postinstall.mjs", "prompts/bot.md", "CHANGELOG.md"]) {
+  for (const required of ["dist/index.js", "dist/tui.js", "dist/setup.js", "dist/install.js", "dist/repositories.js", "dist/repository-report.js", "scripts/postinstall.mjs", "prompts/bot.md", "CHANGELOG.md"]) {
     assert.ok(archive.files.some(file => file.path === required), `Missing packaged file: ${required}`);
   }
   const file = join(output, archive.filename), prefix = join(temporary, "prefix"), config = join(temporary, "config");
-  const env = { ...process.env, OPENCODE_CONFIG_DIR: config, XDG_CONFIG_HOME: join(temporary, "xdg") };
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: config, XDG_CONFIG_HOME: join(temporary, "xdg"), XDG_STATE_HOME: join(temporary, "state") };
   // Reuse cached downloads, allowing metadata lookups absent from npm ci's cache.
   await exec("npm", ["install", "--global", "--prefix", prefix, "--prefer-offline", "--ignore-scripts=false", "--no-audit", "--no-fund", file], {
     env, timeout: 120_000, maxBuffer: 8 * 1024 * 1024,
@@ -35,6 +35,8 @@ try {
   assert.deepEqual(await readdir(config), ["plugins"], "Installation must not create project configuration");
   const help = await exec(join(prefix, "bin", pkg.name), ["--help"], { env, cwd: temporary, timeout: 15_000 });
   assert.match(help.stdout, /init/);
+  const inventory = await exec(join(prefix, "bin", pkg.name), ["list", "--json"], { env, cwd: temporary, timeout: 15_000 });
+  assert.deepEqual(JSON.parse(inventory.stdout), { entries: [], warnings: [] }, "Inventory works outside Git without starting a service");
   const digest = createHash("sha256").update(await readFile(file)).digest("hex");
   await writeFile(`${file}.sha256`, `${digest}  ${archive.filename}\n`);
   if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `filename=${archive.filename}\n`);

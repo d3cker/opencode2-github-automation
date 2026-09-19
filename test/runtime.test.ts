@@ -20,7 +20,7 @@ async function fixture() {
   const registration = { dispose: async () => {} };
   const ctx = {
     session: { hook: async (name: string, hook: any) => { hooks[name] = hook; return registration; },
-      get: async ({ sessionID }: any) => { if (sessionID === "ses_child") return { parentID: "ses_main" }; if (sessionID === "normal") return {}; if (helperLookups++ === 0) throw { _tag: "SessionNotFoundError" }; return { outcome: "succeeded" }; },
+      get: async ({ sessionID }: any) => { if (sessionID === task.sessionID) return { location: { directory: task.worktree } }; if (sessionID === "ses_child") return { parentID: task.sessionID, location: { directory: task.worktree } }; if (sessionID === "normal") return {}; if (helperLookups++ === 0) throw { _tag: "SessionNotFoundError" }; return { outcome: "succeeded" }; },
       create: async (value: any) => { created.push(value); return value; }, prompt: async (value: any) => { prompted.push(value); }, wait: async () => {},
       context: async () => [{ type: "assistant", text: "The button is red.", finish: "stop" }], interrupt: async () => {},
     },
@@ -33,7 +33,7 @@ async function fixture() {
     helper: async ({ sessionID, capability }) => { task.helpers = [{ id: "ses_helper", parentID: sessionID, capability }]; return { id: "ses_helper" }; },
   });
   const stop = await setupRuntime(ctx, options);
-  return { directory, task, options, hooks, tools, created, prompted, normalQuestions: () => normalQuestions, close: async () => { await stop(); unbind(); await rm(directory, { recursive: true, force: true }); } };
+  return { directory, task, options, hooks, tools, created, prompted, restart: async () => { await stop(); return setupRuntime(ctx, GithubOptions.parse(JSON.parse(JSON.stringify(options)))); }, normalQuestions: () => normalQuestions, close: async () => { await stop(); unbind(); await rm(directory, { recursive: true, force: true }); } };
 }
 test("runtime replaces console questions only for bot sessions and blocks tools while waiting", async () => {
   const f = await fixture();
@@ -85,5 +85,51 @@ test("native subagent questions are routed to the owning issue session", async (
     assert.equal(f.task.question?.sessionID, "ses_main");
     assert.match(f.task.question!.text, /1\. Use retries\?/); assert.match(f.task.question!.text, /Yes: Retry twice/);
     assert.equal(f.normalQuestions(), 0);
+  } finally { await f.close(); }
+});
+
+test("repository opt-in approves file access for new sessions and native workers after runtime reload", async () => {
+  const f = await fixture();
+  let stopReloaded;
+  const worktree = await mkdtemp(join(tmpdir(), "oc2-policy-worktree-"));
+  try {
+    f.task.worktree = worktree;
+    f.options.repositories[0]!.autoApproveRepositoryFiles = true;
+    // Reconstruct settings as a worker loader does after installation/restart.
+    stopReloaded = await f.restart();
+    for (const main of ["ses_main", "ses_next_round"]) {
+      f.task.sessionID = main;
+      for (const sessionID of [main, "ses_child"]) {
+        for (const [action, resources] of [["external_directory", [f.directory + "/*"]], ["read", ["README.md"]], ["edit", ["new/file.ts"]]] as const) {
+          const event = { sessionID, action, resources: [...resources], effect: "ask" };
+          await f.hooks.evaluate!(event);
+          assert.equal(event.effect, "allow", `${main}/${sessionID}/${action}`);
+          assert.equal(f.task.question, undefined);
+        }
+      }
+    }
+  } finally { await stopReloaded?.(); await f.close(); await rm(worktree, { recursive: true, force: true }); }
+});
+
+test("repository approval preserves explicit denials, unrelated sessions, other repos and non-file permissions", async () => {
+  const f = await fixture();
+  try {
+    const fileEvent = { sessionID: "ses_main", action: "external_directory", resources: [f.directory + "/*"], effect: "ask" };
+    await f.hooks.evaluate!({ ...fileEvent }); assert.ok(f.task.question); // Existing configs remain opt-out.
+    f.task.question = undefined;
+    f.options.repositories[0]!.autoApproveRepositoryFiles = true;
+    const deny = { ...fileEvent, effect: "deny" }; await f.hooks.evaluate!(deny); assert.equal(deny.effect, "deny"); assert.equal(f.task.question, undefined);
+    f.task.permissions = [{ sessionID: "ses_main", action: fileEvent.action, resources: fileEvent.resources, allow: false }];
+    const deniedInIssue = { ...fileEvent }; await f.hooks.evaluate!(deniedInIssue); assert.equal(deniedInIssue.effect, "deny"); assert.equal(f.task.question, undefined);
+    f.task.permissions = [];
+    const normal = { ...fileEvent, sessionID: "normal" }; await f.hooks.evaluate!(normal); assert.equal(normal.effect, "ask"); assert.equal(f.task.question, undefined);
+    f.task.helpers = [{ id: "ses_helper", parentID: "ses_main", capability: "vision" }];
+    for (const change of [{ sessionID: "ses_helper" }, { action: "shell", resources: ["npm test"] }, { resources: ["/etc/*"] }]) {
+      const event = { ...fileEvent, ...change }; await f.hooks.evaluate!(event); assert.equal(event.effect, "deny"); assert.ok(f.task.question); f.task.question = undefined;
+    }
+    f.task.repo = "other/repository";
+    const other = { ...fileEvent }; await f.hooks.evaluate!(other); assert.equal(other.effect, "deny"); assert.ok(f.task.question);
+    f.task.repo = "o/r";
+    const pending = { ...fileEvent }; await f.hooks.evaluate!(pending); assert.equal(pending.effect, "deny");
   } finally { await f.close(); }
 });

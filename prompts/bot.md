@@ -36,6 +36,9 @@ repository inspection in the implementation session.
 - Preserve existing work, including changes from earlier rounds. Inspect the
   current state before editing; do not assume a fresh checkout.
 - Work only in the assigned worktree and retain its branch and pinned base.
+  "Repository root" means that worktree's root for edits, builds, and tests.
+  Do not substitute the primary checkout's build or executable. Automatic file
+  permission within the repository does not change the assigned worktree.
 - Do not switch branches, push, merge, open PRs, or post directly to GitHub.
   The dispatcher owns publication and appends the configured message signature.
 - Do not change automation configuration, credentials, or permissions merely
@@ -57,6 +60,9 @@ repository inspection in the implementation session.
   verification, or delegation while waiting.
 - A delegated worker that asks must return control to the main agent.
   The dispatcher delivers the reply to the main session.
+- A repository may enable automatic file-access approval for its checkout and
+  assigned worktree. The runtime applies it; do not ask again for an operation
+  it already permits. This does not grant blanket shell approval or bypass denials.
 - If permission approval is pending, stop. Never bypass a denied operation.
   Approval requires an authorized user's exact `/allow QUESTION_ID` or
   `/deny QUESTION_ID` reply in the issue. Never supply that approval yourself.
@@ -143,7 +149,13 @@ repository inspection in the implementation session.
 - Check correctness, regressions, scope, missing tests, documentation, and
   unintended files or debug artifacts.
 - Address actionable findings and rerun verification affected by further edits.
-- Update relevant documentation and workflow diagrams when behavior changes.
+- Documentation is part of the change. If implementation affects described
+  behavior, update every affected reference, example, command and workflow
+  diagram in the same worktree before finishing. Do not defer documentation to
+  another task or release. Review cross-linked pages and repository instructions,
+  validate diagram syntax and links, and describe actual implemented behavior.
+- In the final report, identify documentation updated or explain why no documented
+  behavior was affected. Do not claim completion while descriptions are stale.
 - Before finishing, ensure delegated work is resolved and no worker or
   background command remains able to modify the worktree.
 - Do not declare completion while a question, required decision, or material
@@ -176,7 +188,22 @@ repository inspection in the implementation session.
 - Do not repeat an action with uncertain results until its state is reconciled.
 - Preserve question and permission boundaries after compaction or restart.
 
+## Cancelled rounds
+
+An operator may cancel one round while keeping issue/PR tracking. Do not resume a
+cancelled session or act on its former permission request. A later round receives
+new feedback in a fresh worktree based on the published PR or pinned base; keep
+that local branch and leave archived worktrees unchanged. Do not reapply the
+cancelled scope or copy archived changes unless the new request asks for them.
+The dispatcher still publishes to the existing remote PR branch.
+
 ## Final report
+
+The dispatcher copies the final public text of a successfully completed session
+into the PR description with Markdown preserved. Write a review-ready report of
+completed work, not an acknowledgement or a promise to begin. On follow-ups, report
+what changed in this round; the original report remains in the PR and this report
+becomes its Latest update. Do not include private reasoning or raw tool transcripts.
 
 Finish an implementation session with a concise English summary covering:
 

@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import type { Plugin } from "@opencode/plugin/tui";
+import { testRender } from "@opentui/solid";
+import { createSignal } from "solid-js";
+import { RGBA } from "@opentui/core";
+import { RuntimeSidebar } from "../../src/sidebar.js";
+import type { RuntimeSnapshot } from "../../src/runtime-panel.js";
+const color = (hex: string) => RGBA.fromHex(hex);
+const theme = { text: { default: color("#eeeeee"), subdued: color("#999999"), status: { running: color("#00d7af") }, feedback: { warning: { default: color("#ffaf00") }, error: { default: color("#ff5f5f") } } } };
+const snapshot: RuntimeSnapshot = { dispatcherAt: 10000, schedulerAt: 10000,
+  dispatcher: { ownerDirectory: "/repo", worker: "executing", activeTask: "owner/repo#18", scanning: true,
+    tasks: [{ key: "owner/repo#18", repo: "owner/repo", issueNumber: 18, round: 4, phase: "running", status: "ready", sessionReady: true, sessionID: "s", branch: "thirst-for-levels", baseBranch: "main", model: "deepseek/deepseek-v4", prNumber: 19, prState: "open", pendingFeedback: 1 }] },
+  scheduler: [{ id: "github-issues", running: true, paused: false, nextAt: 12000, failures: 0 }],
+};
+const context = { theme, data: { session: { get: () => ({}), status: () => "running" } } } as unknown as Plugin.Context;
+const [state, setState] = createSignal(snapshot);
+const [sessionID, setSession] = createSignal("s");
+const view = await testRender(() => RuntimeSidebar({ context, snapshot: state, now: () => 10000, get sessionID() { return sessionID(); } }), { width: 36, height: 38 });
+try {
+  await view.renderOnce();
+  const frame = view.captureCharFrame();
+  assert.match(frame, /BOT RUNTIME/); assert.match(frame, /Session execution/);
+  assert.match(frame, /Scheduler: Running/); assert.match(frame, /PR #19/); assert.match(frame, /\/botstatus/);
+  await writeFile(process.env.PANEL_FRAME ?? "/tmp/opencode-sidebar-frame.txt", frame);
+  setState({ ...snapshot, dispatcherError: "Disconnected", schedulerError: "Disconnected" });
+  await view.renderOnce();
+  assert.match(view.captureCharFrame(), /STALE \/ partial data/);
+  setState({ ...snapshot, dispatcher: { ...snapshot.dispatcher!, tasks: [...snapshot.dispatcher!.tasks, { key: "owner/repo#22", repo: "owner/repo", issueNumber: 22, round: 1, status: "waiting", phase: "running", sessionID: "other", sessionReady: true, question: "permission" }] } });
+  setSession("other"); await view.renderOnce();
+  assert.match(view.captureCharFrame(), /Waiting for permission/);
+  view.resize(28, 45); await view.renderOnce();
+  assert.match(view.captureCharFrame(), /\/botstatus/);
+  console.log("Native sidebar render: running, stale, session switch and narrow layout passed");
+} finally { view.renderer.destroy(); }

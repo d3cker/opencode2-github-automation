@@ -6,6 +6,14 @@ import type { Activity } from "../src/activity.js";
 
 const activity: Activity = { key: "owner/repo#1", repo: "owner/repo", issueNumber: 1, round: 1, phase: "running", status: "ready", sessionID: "ses_test", sessionReady: true, worktree: "/worktree" };
 function fixture(initial: Activity[] = [], restored: string[] = []) {
+  const cancelled: string[] = [], resumed: string[] = [];
+  const recovered: string[] = [], alerts: unknown[] = [], ended: string[] = [];
+  const choices: (string | undefined)[] = [];
+  let recoveryError: Error | undefined;
+  let repositoriesError = false;
+  const repositoryRequests: unknown[] = [];
+  const repositoryReport = { entries: [{ ownerDirectory: "/remote/owner", directory: "/remote/project", stateDirectory: "/remote/state", repo: "remote/repo", baseBranch: "devel", registeredAt: 0, status: "not-running" }], warnings: [] };
+  const commands = new Map<string, () => Promise<void>>();
   const toasts: unknown[] = [], opened: string[] = [], navigated: unknown[] = [], closed: string[] = [];
   const tabs = new Map(restored.map(sessionID => [sessionID, { sessionID, busy: false }]));
   let enabled = true;
@@ -13,9 +21,9 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
   let command!: () => Promise<void>, unsubscribed = false;
   const context = {
     location: { directory: "/repo" },
-    client: { rpc: () => ({ activity: async () => initial, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
+    client: { rpc: () => ({ repositories: async (_input: unknown, request: unknown) => { repositoryRequests.push(request); if (repositoriesError) throw new Error("Unavailable"); return repositoryReport; }, activity: async () => initial, cancelround: async ({ key }: { key: string }) => { cancelled.push(key); return { accepted: true }; }, resumetracking: async ({ key }: { key: string }) => { resumed.push(key); return { accepted: true }; }, close: async ({ key }: { key: string }) => { ended.push(key); return { accepted: true }; }, restartworkflow: async ({ key }: { key: string }) => { if (recoveryError) throw recoveryError; recovered.push(key); return { accepted: true }; }, events: { on: (_name: string, cb: typeof listener) => { listener = cb; return () => { unsubscribed = true; }; } } }) },
     data: { session: { sync: async () => {} } },
-    keymap: { layer: (get: () => { commands: { run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; } },
+    keymap: { layer: (get: () => { commands: { slash: { name: string }; run: () => Promise<void> }[] }) => { command = get().commands[0]!.run; for (const cmd of get().commands) commands.set(cmd.slash.name, cmd.run); } },
     ui: {
       slot: (claim: { render: () => unknown }) => { claim.render(); return () => {}; },
       toast: { show: (value: unknown) => toasts.push(value) },
@@ -25,11 +33,11 @@ function fixture(initial: Activity[] = [], restored: string[] = []) {
         close: (id: string) => { assert.equal(typeof id, "string"); if (!tabs.delete(id)) return false; closed.push(id); return true; },
       },
       router: { navigate: (value: unknown) => navigated.push(value) },
-      dialog: { select: async () => activity.key, alert: async () => {} },
+      dialog: { select: async (input: { options: { value: string }[] }) => choices.length ? choices.shift() : input.options.some(o => o.value === activity.key) ? activity.key : "open", alert: async (value: unknown) => { alerts.push(value); } },
     },
   } as unknown as Plugin.Context;
   const stop = setupUI(context)!;
-  return { toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
+  return { cancelled, resumed, repositoryRequests, repositoriesError: () => { repositoriesError = true; }, ended, choose: (...values: (string | undefined)[]) => choices.push(...values), recovered, alerts, recoveryError: (error: Error) => { recoveryError = error; }, restart: () => commands.get("restartworkflow")!(), toasts, opened, navigated, closed, tabs, enableTabs: (value: boolean) => { enabled = value; }, stop, unsubscribed: () => unsubscribed, command: () => command(), event: (data: Activity, directory = "/repo") => listener({ data, location: { directory } }) };
 }
 
 test("a start event opens a background tab once without navigating the current conversation", async () => {
@@ -108,4 +116,85 @@ test("activity includes saved main sessions, previous sessions and media helpers
   const row = activityOf({ key: "owner/repo#1", repo: "owner/repo", issue: { number: 1 }, phase: "pr_opened", status: "done", sessionID: "ses_current", previousSessionID: "ses_previous", sessionIDs: ["ses_old", "ses_previous", "ses_current"], helpers: [{ id: "ses_vision" }], pr: { state: "closed", html_url: "https://github.com/owner/repo/pull/2" } } as import("../src/dispatcher.js").Task);
   assert.deepEqual(row.sessionIDs, ["ses_old", "ses_previous", "ses_current", "ses_vision"]);
   assert.equal(row.phase, "pr_closed"); assert.equal(row.prState, "closed");
+});
+
+test("/restartworkflow sends the selected task to its owner and displays recovery failures", async () => {
+  const f = fixture([{ ...activity, status: "blocked" }]);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    await f.restart();
+    assert.deepEqual(f.recovered, [activity.key]);
+    assert.match(JSON.stringify(f.toasts.at(-1)), /recovery queued from the saved stage/);
+    assert.equal(f.opened.length, 0);
+    f.recoveryError(new Error("Answer the pending question in the GitHub issue first"));
+    await f.restart();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /pending question/);
+    assert.equal(f.recovered.length, 1);
+  } finally { f.stop(); }
+});
+
+test("/bot closes tracking only after confirmation and keeps closed sessions accessible", async () => {
+  const f = fixture([{ ...activity, status: "blocked" }], ["ses_test"]);
+  try {
+    await new Promise(r => setImmediate(r));
+    f.choose(activity.key, "close", "cancel"); await f.command(); assert.deepEqual(f.ended, []);
+    f.choose(activity.key, "close", "confirm"); await f.command(); assert.deepEqual(f.ended, [activity.key]);
+    f.event({ ...activity, status: "closed" }); assert.deepEqual(f.closed, ["ses_test"]);
+    f.event(activity); assert.deepEqual(f.opened, []);
+    f.choose(activity.key, "open"); await f.command(); assert.equal(f.navigated.length, 1);
+  } finally { f.stop(); }
+});
+
+test("/bot can close tracking before a session exists and tab-only closure never calls the owner", async () => {
+  const f = fixture([{ ...activity, sessionID: undefined, sessionReady: false, status: "blocked" }]);
+  try {
+    await new Promise(r => setImmediate(r));
+    f.choose(activity.key, "close", "confirm"); await f.command(); assert.equal(f.ended.length, 1);
+    f.event(activity); f.tabs.get("ses_test")!.busy = true;
+    f.choose(activity.key, "tabs"); await f.command(); assert.equal(f.closed.length, 0); assert.equal(f.ended.length, 1);
+    assert.match(JSON.stringify(f.toasts.at(-1)), /Busy tabs/);
+  } finally { f.stop(); }
+});
+
+
+test("/bot lists remote repositories even with no tasks and never starts or restarts a task", async () => {
+  const f = fixture();
+  try {
+    f.choose("repositories", "0"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /remote\/repo/);
+    assert.match(JSON.stringify(f.alerts.at(-1)), /remote\/project/);
+    assert.equal((f.repositoryRequests[0] as { location: { directory: string } }).location.directory, "/repo");
+    assert.deepEqual(f.recovered, []); assert.deepEqual(f.ended, []); assert.deepEqual(f.navigated, []);
+    f.repositoriesError(); f.choose("repositories"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /Repositories unavailable/);
+  } finally { f.stop(); }
+});
+
+test("cancel round and resume tracking are separate confirmed owner actions, not task closure", async () => {
+  const f = fixture();
+  try {
+    f.event(activity);
+    f.choose(activity.key, "cancelround", "back"); await f.command(); assert.deepEqual(f.cancelled, []);
+    f.choose(activity.key, "cancelround", "confirm"); await f.command(); assert.deepEqual(f.cancelled, [activity.key]);
+    assert.deepEqual(f.ended, []);
+    f.event({ ...activity, controlVersion: 1, status: "closed" });
+    f.choose(activity.key, "resumetracking", "confirm"); await f.command(); assert.deepEqual(f.resumed, [activity.key]);
+    f.event({ ...activity, controlVersion: 2, status: "watching" });
+    f.event({ ...activity, controlVersion: 1, status: "closed" }); // stale event cannot undo explicit resume
+    f.choose(activity.key, "details"); await f.command();
+    assert.match(JSON.stringify(f.alerts.at(-1)), /Status: watching/);
+    assert.deepEqual(f.ended, []);
+  } finally { f.stop(); }
+});
+
+test("late start events cannot revive a cancelled round in the UI", async () => {
+  const f = fixture();
+  try {
+    f.event({ ...activity, controlVersion: 1, status: "cancelling" });
+    f.event({ ...activity, controlVersion: 1, status: "watching" });
+    f.event({ ...activity, controlVersion: 1, status: "ready" });
+    assert.deepEqual(f.opened, []);
+    f.event({ ...activity, round: 2, controlVersion: 1, status: "ready", sessionID: "new" });
+    assert.deepEqual(f.opened, ["new"]);
+  } finally { f.stop(); }
 });

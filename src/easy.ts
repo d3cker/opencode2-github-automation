@@ -5,6 +5,7 @@ import { z } from "zod";
 import { GithubOptions, SchedulerOptions, MergeOptions, Capabilities, BranchName } from "./config.js";
 
 export const EasyOptions = z.object({
+  autoApproveRepositoryFiles: z.boolean().optional(),
   baseBranch: BranchName.optional(),
   capabilities: Capabilities.optional(),
   mediaModel: z.object({ model: z.string().regex(/^[^/\s]+\/\S+$/), capabilities: Capabilities }).strict().optional(),
@@ -80,7 +81,7 @@ export async function resolveEasy(directory: string, raw: unknown, execute = run
   const slash = options.model.indexOf("/");
   const stateDirectory = join(common, "opencode2-automation");
   const github = GithubOptions.parse({ systemPromptFile: options.systemPromptFile, signature: options.signature ?? `${login}[OpenCode2]`, autoMerge: options.autoMerge, ownerDirectory: root, stateDirectory,
-    repositories: [{ repo, directory: root, baseBranch, allowedAuthors: options.authors ?? [login], checks: check === false ? [] : [check] }],
+    repositories: [{ repo, directory: root, autoApproveRepositoryFiles: options.autoApproveRepositoryFiles, baseBranch, allowedAuthors: options.authors ?? [login], checks: check === false ? [] : [check] }],
     routes: { [options.trigger]: { agent: "build", capabilities: options.capabilities, mediaModel: options.mediaModel ? { capabilities: options.mediaModel.capabilities, model: { providerID: options.mediaModel.model.split("/")[0], id: options.mediaModel.model.slice(options.mediaModel.model.indexOf("/") + 1) } } : undefined, model: { providerID: options.model.slice(0, slash), id: options.model.slice(slash + 1) } } },
   });
   const scheduler = SchedulerOptions.parse({ ownerDirectory: root, stateDirectory, jobs: [{ id: "github-issues", everySeconds: options.everySeconds }] });

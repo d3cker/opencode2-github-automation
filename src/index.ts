@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import github from "./plugins/github.js";
 import scheduler from "./plugins/scheduler.js";
+import { registerConfigured } from "./repositories.js";
 import { checkout, resolveEasy } from "./easy.js";
 
 export default Plugin.define({
@@ -17,6 +18,8 @@ export default Plugin.define({
       try { options = JSON.parse(await readFile(join(location.root, ".opencode", "automation.json"), "utf8")); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     }
+    await registerConfigured(location.root, Object.keys(ctx.options).length ? options : undefined)
+      .catch(() => console.error("Repository registration failed. Use list --discover to retry standard configurations."));
     const resolved = await resolveEasy(location.root, options);
     const stopGithub = await github.setup({ ...ctx, options: resolved.github });
     try {
