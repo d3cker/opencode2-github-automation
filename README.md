@@ -11,7 +11,7 @@ titles, and can merge after an authorized approval. The TUI is optional.
 
 ## Requirements
 
-- OpenCode **2** with a working model; tested with `0.0.0-beta-19398`.
+- OpenCode **2.0.6** with a working model; client/plugin SDK pinned to `2.0.6`.
 - Node.js 22+, npm, and Git on macOS/Linux.
 - GitHub authentication (`gh auth login` and `gh auth setup-git`, or a token in
   the service environment) and permission to comment, push, and create PRs.
@@ -26,12 +26,12 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 Run this command on the machine running OpenCode 2:
 
 <!-- latest-release:start -->
-Latest stable release: **[v0.6.5](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.5)**.
+Latest stable release: **[v0.6.6](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.6)**.
 
-[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.5/opencode2-automation-0.6.5.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.5/opencode2-automation-0.6.5.tgz.sha256)
+[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz.sha256)
 
 ```bash
-npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.5/opencode2-automation-0.6.5.tgz"
+npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz"
 ```
 <!-- latest-release:end -->
 
@@ -98,6 +98,14 @@ and respects `XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR`.
 3. Load the project with the [headless command below](#run-without-the-tui), or
    open it with `opencode2 /absolute/path/to/your-project`.
 
+The wizard can enable automatic file access within this repository and its bot
+worktrees. Choose **yes** at the file-access prompt, or pass
+`--auto-approve-repository-files` to `init`. Existing projects can set
+`"autoApproveRepositoryFiles": true` in their configuration. This does not change
+global permissions or approve arbitrary shell commands. See
+[repository file approvals](docs/configuration.md#repository-file-approvals) for
+scope, restart steps, and pending questions.
+
 Settings are saved to `/absolute/path/to/your-project/.opencode/automation.json`.
 If it already exists, edit it directly and skip `init`. Repeat setup for each
 repository; the plugin is installed only once. After editing settings, restart
@@ -113,12 +121,18 @@ Only the authenticated GitHub user is allowed by default; add colleagues to
 Run once for **each configured primary checkout**, with its absolute path:
 
 ```bash
-opencode2 api v2.plugin.awaitActivation --param 'location[directory]=/absolute/path/to/your-project'
+opencode2 api plugin.list --param 'location[directory]=/absolute/path/to/your-project'
 ```
 
 This starts the shared service if needed and loads the project's plugins. The
-command exits; the bot keeps running without a TUI or extra monitoring process.
+response lists the loaded plugins; confirm `automation` has `state.status` equal
+to `active`. The command exits; the bot keeps running without a TUI or extra monitoring process.
 **Repeat it after every service restart.**
+
+OpenCode 2.0.6 uses operation names without the `v2.` prefix and no longer exposes
+`plugin.awaitActivation`. Upgrade the automation package together with OpenCode;
+older beta SDKs cannot discover its service correctly. See
+[upgrade compatibility](docs/installation.md#opencode-206-compatibility).
 
 For automatic startup after a machine reboot, put one invocation per project in
 your operating system's startup mechanism, under the same user, after networking
@@ -249,10 +263,38 @@ installations are not removed by `npm uninstall --global`.
 - **Merging:** approve the bot's PR or post a configured merge phrase. The author
   must be allowed and have repository write access. Set `autoMerge.enabled` to
   `false` to disable this. `signature` controls the signature on new bot messages.
+- **Repository inventory:** run `opencode2-automation list` from any directory,
+  or choose **Repositories** in `/bot`. See registered GitHub repositories, owner
+  and checkout paths, base branches, timestamped runtime status, scan timing and
+  issue counts/errors. Use `list --json` for scripts and
+  `list --discover /absolute/path/to/projects` to import older standard configs
+  without starting bots. See [repository inventory](docs/runtime.md#repository-inventory).
+- **Runtime status:** the right sidebar's **BOT RUNTIME** panel shows dispatcher
+  work, GitHub discovery, scheduled scans, queue counts and the selected task.
+  `/botstatus` opens a full text report. Status refreshes every five seconds;
+  unavailable or stale readings are marked explicitly. See
+  [runtime panel details](docs/runtime.md#runtime-status-sidebar).
+- **Task management:** `/bot` lets you open a session, inspect details, close idle
+  tabs, restart a stopped workflow, **Cancel current round** while keeping issue
+  tracking, or stop sessions and end task tracking. **Resume issue tracking**
+  restores a closed task for future comments without replaying its old round. Closing
+  tracking preserves all local work and history, works without a surviving GitHub
+  issue/PR, and prevents rediscovery. See [task management](docs/runtime.md#manage-tasks-from-bot).
 - **Progress:** use `/bot` in the TUI, or the CLI's `status`, `scan`, `pause`, and
   `resume` commands from the target repository. Closing a PR closes its bot tabs
   while retaining session history. Authorized issue comments can continue work
-  on an open PR without another mention.
+  on an open PR without another mention, after the current round publishes.
+- **PR descriptions:** the successful session's final summary appears in the PR,
+  with dispatcher checks listed separately. Follow-ups keep the original report
+  and replace **Latest update**. Keep manual notes outside the managed HTML markers.
+  See [PR descriptions](docs/runtime.md#pr-descriptions).
+- **Recovery:** completing a stopped bot session manually is detected by the
+  dispatcher, which verifies and publishes before processing queued comments.
+  Use `/restartworkflow` in the owner project's TUI or
+  `opencode2-automation restartworkflow 'owner/repository#123'` from its primary
+  checkout to recover an eligible stopped task without discarding work. Pending
+  questions and failing checks still block progress. See
+  [workflow recovery](docs/runtime.md#interrupted-sessions-and-workflow-recovery).
 
 Keep machine-specific `.opencode/automation.json` files out of Git: global `init`
 does not add an ignore rule. See [configuration and Git branches](docs/configuration.md#configuration-files-and-git-branches)
@@ -291,21 +333,27 @@ copy it to another machine and follow the `.tgz` instructions above.
 
 ## GitHub Actions and releases
 
-1. Work on a feature branch and add release notes under `Unreleased` in
-   [CHANGELOG.md](CHANGELOG.md). Ordinary branch pushes do not run CI or publish packages.
-2. Open a PR into the long-lived `release` branch. CI runs lint, type checking,
-   tests, a build, and an installation check on Node 22 and 24. New commits to
-   the open PR rerun these checks. Review and merge after they pass.
-3. The merge starts **Release**. It increments the patch version on `release`,
-   moves the unreleased notes into that version's changelog section, and pushes
-   the version commit and tag atomically. It builds and verifies the tagged
-   package, then publishes the GitHub Release with `.tgz`, SHA-256, and exact
-   version notes. No package is published to npm.
-4. Only after publication succeeds, automation commits the versioned README link
-   on `release` and opens or updates a PR from `release` into `main`.
-5. Review and merge that PR with a **merge commit**. All code, version metadata,
-   release notes, and README changes reach protected `main` through this PR.
-   The automation never pushes to `main` or writes its files through the API.
+1. Create a feature branch from `devel` and add release notes under `Unreleased`
+   in [CHANGELOG.md](CHANGELOG.md). Pushes without an open PR do not run CI.
+2. Open a PR into `devel`. CI runs lint, type checking, tests, a build, and an
+   installation check on Node 22 and 24. New commits to the open PR rerun checks.
+   Review and merge after they pass. Merging into `devel` does not publish a package.
+3. When ready to publish the accumulated changes, open a `devel` → `release` PR.
+   After its checks pass, review and merge it with a **merge commit**.
+4. The merge starts **Release**: an automatic patch version, exact changelog notes,
+   atomic version/tag push, and publication of the verified `.tgz` and SHA-256.
+   No package is published to npm.
+5. After publication, automation commits the new README download link on `release`
+   and opens or updates the `release` → `main` promotion PR. It also automatically
+   merges that published head into `devel`, including version metadata and README,
+   preserving newer development work. No synchronization PR is created.
+6. Review and merge the promotion PR with a **merge commit**. Protected `main`
+   receives all released code, metadata and README through that PR only.
+
+A synchronization conflict or rejected push fails the Release job without
+resetting `devel` or undoing publication. Resolve the conflict or permissions and
+rerun the job; it reuses the published version. Synchronization does not wait for
+the main PR to merge and does not trigger another release.
 
 To choose a version manually, prepare and commit its exact changelog section on
 `release`, then use `npm version`, for example:
@@ -321,7 +369,8 @@ git push --atomic origin release v1.0.0
 The pushed tag publishes exactly `1.0.0`, without another version bump. Both
 `v1.0.0` and `1.0.0` tag names are accepted. The next automatic patch is `1.0.1`.
 Version tags must point to code on `release`; ordinary pushes to that branch
-never start publication. Finish the active release before merging another feature.
+never start publication. Finish the active release before merging another `devel` → `release` PR.
+Feature PRs may continue to accumulate on `devel`.
 
 The README on `release` is updated after publication; the README on `main` changes
 when the promotion PR is merged. The tag and packaged README remain snapshots

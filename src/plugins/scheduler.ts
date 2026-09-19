@@ -1,3 +1,4 @@
+import { publishRepositoryRuntime } from "../repositories.js";
 import { Plugin } from "@opencode/plugin";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,10 +22,12 @@ export default Plugin.define({
       return abortable(() => method(job.input, { signal }), signal);
     });
     let registration: { dispose(): Promise<void> } | undefined;
+    let stopInventory: (() => Promise<void>) | undefined;
     let stopHeartbeat: (() => Promise<void>) | undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
     const stop = () => cleanup(
       () => { clearInterval(timer); controller.abort(); },
+      () => stopInventory?.(),
       () => stopHeartbeat?.(),
       () => scheduler.settle(),
       () => abortable(async () => { await registration?.dispose(); }, AbortSignal.timeout(5_000)),
@@ -40,6 +43,7 @@ export default Plugin.define({
       const tick = () => { if (!controller.signal.aborted) void scheduler.tick().catch(error => { console.error("Scheduler stopped", error); controller.abort(error); }); };
       timer = setInterval(tick, 1000);
       stopHeartbeat = heartbeat(signal => touchOwner(options.ownerDirectory, signal), error => console.error("Scheduler owner heartbeat failed", redact(error)));
+      stopInventory = publishRepositoryRuntime(options.ownerDirectory, "scheduler", () => scheduler.status(), () => controller.signal.aborted);
       tick();
       return stop;
     } catch (error) {

@@ -7,7 +7,9 @@ and troubleshooting.
 The README's package installation command contains the versioned GitHub asset URL
 for the stable release promoted into that branch. After publication, automation
 updates README on `release`; its PR carries the update into `main` when merged.
-While that PR awaits review, `release` contains the newer download link. For
+While that PR awaits review, `release` contains the newer download link. The
+publisher also merges the released version and README into `devel` automatically,
+without waiting for the main PR or creating another PR. For
 upgrades, use that branch's current README rather than a copy from an old archive
 or tag, and keep the same installation prefix. Prereleases do not replace the
 stable link. Maintainer setup and retries are in [Release process](releases.md).
@@ -42,7 +44,7 @@ hook; remove the OpenCode loaders first as described in the README.
 
 ## Prerequisites
 
-- OpenCode **2**, with a working model. Tested SDK version: `0.0.0-beta-19398`.
+- OpenCode **2.0.6**, with a working model. Client/plugin SDK version: `2.0.6`.
 - Node.js 22+, npm, Git, and Bash on macOS/Linux.
 - GitHub authentication and permission to comment, push, create PRs, and merge.
 - A target repository with issues enabled and at least one pushed commit.
@@ -76,7 +78,8 @@ GitHub user, not the repository owner. The model default is queried from the run
 OpenCode service; without it, the model is required. Command-line flags override
 prompts. `--skip-tests` explicitly disables tests; Enter otherwise accepts the
 shown test command or `skip`.
-The wizard also asks for model capabilities, a vision helper if the main model
+The wizard also asks whether to auto-approve repository file access (default no),
+plus model capabilities, a vision helper if the main model
 lacks vision, and the base branch. Existing JSON files can be extended manually;
 see [runtime settings](runtime.md).
 
@@ -93,12 +96,70 @@ registers the server/UI loaders, and runs the wizard. Existing configuration and
 queues are preserved on upgrades. Do not combine global and project-local copies.
 No package is published to npm; `private: true` blocks accidental publication.
 
+## TUI rendering and source validation
+
+The runtime sidebar uses the host's OpenTUI/Solid APIs and semantic theme tokens.
+The package declares OpenTUI and Solid peer dependencies; server entrypoint imports
+stay independent of renderer initialization. A sidebar update requires both the
+owner plugin's monitor RPC and an updated/reopened TUI. An older or unavailable
+owner is shown as unavailable rather than silently idle. The integration follows
+the [OpenCode CLI plugin API](https://opencode.ai/v2/docs/build/plugins/cli/).
+
+For development, `npm ci` installs pinned renderer, theme and Bun test dependencies.
+`npm run check` includes `npm run test:tui`, which renders the actual sidebar using
+Bun's native OpenTUI support and checks live updates, stale readings, tab selection
+and a narrow layout. Bun is needed for this native renderer test, not for the
+Node-based management CLI. Package validation still imports the server and TUI
+entrypoints in an isolated Node installation without initializing a renderer.
+
 ## Testing and migration
+
+### OpenCode 2.0.6 compatibility
+
+This branch pins `@opencode/client`, `@opencode/plugin`, and the development theme
+package to `2.0.6`. Update the automation package when upgrading OpenCode from the
+older beta build. An old package can still appear active and scan GitHub while
+its management CLI and owner keepalive fail to discover the newer service.
+
+Service discovery now probes `/api/info`. Owner keepalive verifies the service
+PID with `client.server.info()` and updates the same empty maintenance session
+through `session.update`. Session interruption uses `resume: false` to stop work
+without automatically resuming it. The package does not claim compatibility
+with the earlier beta API.
+
+For headless startup, use `opencode2 api plugin.list --param
+'location[directory]=/absolute/path/to/project'` on one line. Confirm that
+`automation` is `active` in the response and repeat for each owner after a
+service restart. The old `v2.plugin.awaitActivation` operation is unavailable.
+`opencode2 api session.active` lists active execution before a planned restart.
+After upgrading, verify `opencode2-automation status` inside each owner checkout,
+fresh dispatcher/scheduler timestamps, and `/bot` in a reopened TUI.
+
+### State preservation
 
 Use a separate test repository when testing on another machine. Independent
 machines do not share queue ownership and can duplicate work on the same issues.
 This installation procedure does not migrate sessions, queues, or worktrees.
 
-Restart the service only when work is idle. Reopen clients after UI updates.
+Back up shared automation state before an upgrade. Once round cancellation has
+saved `cancelling` or `watching`, an older plugin that does not recognize those
+statuses cannot read that queue. Do not downgrade against live newer state or
+delete it to bypass validation; keep the newer plugin or restore a coordinated
+backup while owners are stopped.
+
+Restart the service only when work is idle. Then activate every configured owner
+again as shown in the README. Reopen TUI clients after UI updates to register new
+commands and action menus such as `/bot` task closure and `/restartworkflow`; merely reopening an old task tab does not
+reload its client's command registrations. A service restart preserves queue
+blocks and pending questions. Use [workflow recovery](runtime.md#interrupted-sessions-and-workflow-recovery)
+for an execution stop instead of reinstalling or deleting state.
+After upgrading, activated owners register themselves for
+`opencode2-automation list`. Import older, currently inactive standard projects
+with `opencode2-automation list --discover /absolute/path/to/projects`; this does
+not activate them. Use the same user and `XDG_STATE_HOME` as the service. The TUI's
+**Repositories** option reads the connected server registry. See
+[repository inventory](runtime.md#repository-inventory) for discovery limits,
+status freshness, and missing-directory behavior.
+
 Do not change an active project's `origin` to switch repositories: clone another
 project and configure it separately.

@@ -8,7 +8,7 @@ import { GithubOptions, Job, matchRoute } from "../src/config.js";
 import { Scheduler } from "../src/scheduler.js";
 import { Dispatcher, Blocked, Queue, type Executor, type GithubPort } from "../src/dispatcher.js";
 import { JsonStore, acquire, type Store } from "../src/state.js";
-import { Github, GithubError, type Issue, type Comment } from "../src/github.js";
+import { Github, GithubError, PullHeadPending, type Issue, type Comment } from "../src/github.js";
 import type { Plugin } from "@opencode/plugin";
 import { OpenCodeExecutor } from "../src/executor.js";
 
@@ -30,11 +30,13 @@ function fixture() {
     ensureComment: async () => { events.push("comment"); return 42; },
     findPull: async () => undefined,
     pull: async (_repo, number) => ({ number, html_url: `https://github.com/owner/repo/pull/${number}`, state: "open" }),
+    updatePullBody: async () => {},
     ensurePull: async () => { events.push("pr"); return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; },
   };
   const executor: Executor = {
     selectBase: async (_task, repo) => ({ kind: "branch", branch: repo.baseBranch }),
     hasBranch: async () => true,
+    summary: async t => ({ text: "Implemented counter behavior.", sessionID: t.sessionID, round: t.round }),
     title: async () => "Repair counter increment",
     analyze: async () => { events.push("analyze"); return { kind: "proceed", comment: "Problem and verification plan" }; },
     prepare: async () => { events.push("prepare"); return { worktree: "/worktree", baseSha: "base" }; },
@@ -398,7 +400,7 @@ test("PR explicitly reports skipped tests without claiming a pass", async () => 
   };
   const d = f.make(); await d.init(); await d.scan(); await d.tick();
   assert.equal(d.status()[0]?.status, "done");
-  assert.match(body, /Automated tests were not run/);
+  assert.match(body, /No automated test command is configured for the dispatcher/);
   assert.ok(!body.includes("passed"));
 });
 test("closed issue cannot start a fix", async () => {
@@ -497,7 +499,7 @@ test("new issue feedback prevents auto-merge and merge failures remain retryable
   await d.tick(); assert.equal(merges, 1); assert.equal(d.status()[0]?.pendingFeedback?.length, 1);
 });
 
-test("upgraded queues ignore historical approvals until a new watching baseline exists", async () => {
+test("upgraded queues establish a fresh time window for unbound merge comments", async () => {
   const f = fixture(); const d = f.make(); await d.init(); await d.scan(); await d.tick();
   delete f.store.data.tasks[0]!.publishedAt;
   let since = 0; f.github.mergeApproved = async (_repo, _number, _commit, baseline) => { since = baseline; return false; };
@@ -697,4 +699,434 @@ test("a failed branch-question post is recovered after restart without another m
   f.advance(); d = f.make(); await d.init(); await d.tick();
   assert.equal(d.status()[0]?.status, "waiting"); assert.equal(d.status()[0]?.question?.commentID, 100);
   assert.equal(selections, 1); assert.equal(posts, 2); assert.ok(!f.events.includes("prepare"));
+});
+
+for (const legacy of [true, false]) {
+  test(`a manually completed stopped session publishes and consumes queued feedback after owner restart (${legacy ? "legacy" : "typed"} checkpoint)`, async () => {
+    const f = fixture();
+    let completed = false, prompts = 0;
+    const ctx = { session: {
+      get: async () => ({ location: { directory: "/worktree" }, outcome: completed ? "succeeded" : "interrupted" }),
+      wait: async () => {},
+      context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+      prompt: async () => { prompts++; },
+    } } as unknown as Plugin.Context;
+    const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+    f.executor.run = executor.run.bind(executor); f.executor.completed = executor.completed.bind(executor);
+    let d = f.make(); await d.init(); await d.scan(); await d.tick();
+    assert.equal(d.status()[0]!.status, "blocked");
+    assert.equal(f.events.includes("push"), false);
+    const saved = d.status()[0]!;
+    if (legacy) {
+      delete f.store.data.tasks[0]!.sessionStopped;
+      f.store.data.tasks[0]!.error = "Error: Session timed out and was interrupted; inspect it before retrying";
+    }
+    f.github.comments = async () => [{ id: 100, body: "Revise the visual design on the existing PR", user: { login: "alice" } }];
+    d = f.make(); await d.init(); await d.scan();
+    assert.equal(d.status()[0]!.pendingFeedback?.[0]?.id, 100);
+    f.advance(); await d.tick(); // A stop alone never resumes the model.
+    assert.equal(prompts, 1); assert.equal(d.status()[0]!.status, "blocked");
+    completed = true; f.advance();
+    f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+    d = f.make(); await d.init(); await d.tick();
+    assert.equal(d.status()[0]!.status, "done");
+    assert.equal(d.status()[0]!.sessionID, saved.sessionID);
+    assert.equal(d.status()[0]!.worktree, saved.worktree);
+    assert.equal(d.status()[0]!.branch, saved.branch);
+    assert.equal(prompts, 1);
+    assert.deepEqual(f.events.slice(-3), ["verify", "push", "pr"]);
+    f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+    await d.tick(); await d.tick();
+    assert.equal(d.status()[0]!.round, 2);
+    assert.equal(d.status()[0]!.feedback?.[0]?.id, 100);
+    assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+    assert.equal(d.status()[0]!.branch, saved.branch);
+    assert.equal(d.status()[0]!.pr?.number, 2);
+    assert.equal(prompts, 2); // Exactly one new prompt for the new feedback round.
+    assert.equal(f.events.filter(e => e === "push").length, 2);
+  });
+}
+
+test("automatic session reconciliation never bypasses a failed check or unresolved permission", async () => {
+  const f = fixture();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_saved", promptAttempted: true }); throw new Blocked("Session did not complete successfully; inspect its outcome and permissions"); };
+  f.executor.completed = async () => true;
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.store.data.tasks[0]!.question = { id: "permission", text: "Allow?", sessionID: "ses_saved", permission: { action: "shell", resources: ["deploy"] } };
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]!.status, "blocked");
+  await assert.rejects(d.restartWorkflow("owner/repo#1"), /pending question or permission/);
+  delete f.store.data.tasks[0]!.question;
+  f.executor.run = async () => {};
+  f.executor.verify = async () => { f.events.push("verify"); throw new Blocked("Verification failed: npm test"); };
+  f.advance(); d = f.make(); await d.init(); await d.tick();
+  assert.equal(d.status()[0]!.phase, "verifying");
+  f.advance(); await d.tick();
+  assert.equal(f.events.filter(e => e === "verify").length, 1);
+  assert.equal(f.events.includes("push"), false);
+  await d.restartWorkflow("owner/repo#1"); await d.tick();
+  assert.equal(f.events.filter(e => e === "verify").length, 2);
+  assert.equal(f.events.includes("push"), false);
+});
+
+test("restartworkflow persists one recovery request without resetting session, worktree, PR, or feedback", async () => {
+  const f = fixture();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_saved", promptAttempted: true }); throw new Blocked("Session did not complete successfully; inspect its outcome and permissions"); };
+  let d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const saved = d.status()[0]!;
+  assert.equal(await d.restartWorkflow(saved.key), true);
+  const id = d.status()[0]!.recovery?.id; assert.ok(id);
+  assert.equal(await d.restartWorkflow(saved.key), false);
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  d = f.make(); await d.init();
+  const recovered = d.status()[0]!;
+  for (const key of ["sessionID", "worktree", "branch", "baseSha", "phase", "promptAttempted"] as const) assert.equal(recovered[key], saved[key]);
+  assert.equal(recovered.recovery?.id, id);
+  assert.equal(f.events.includes("cancel"), false);
+  f.executor.run = async task => { assert.equal(task.recovery?.id, id); };
+  await d.tick();
+  assert.equal(d.status()[0]!.status, "done");
+  assert.equal(d.status()[0]!.recovery, undefined);
+  assert.equal(await d.restartWorkflow(saved.key), false);
+});
+
+test("monitor reports in-flight discovery and redacts scan failures without changing queue state", async () => {
+  const f = fixture();
+  let reject!: (error: Error) => void;
+  f.github.issues = () => new Promise((_resolve, fail) => { reject = fail; });
+  const d = new Dispatcher(options, f.store, f.github, f.executor, new AbortController().signal, ["TOPSECRET"], () => 1000);
+  await d.init(); const scan = d.scan();
+  assert.equal(d.monitor().scanning, true); assert.equal(d.monitor().lastScanStarted, 1000);
+  reject(new Error("TOPSECRET failed")); await assert.rejects(scan);
+  assert.equal(d.monitor().scanning, false); assert.equal(d.monitor().lastScanFinished, 1000);
+  assert.doesNotMatch(d.monitor().scanError!, /TOPSECRET/); assert.match(d.monitor().scanError!, /REDACTED/);
+  assert.deepEqual(d.status(), []); assert.equal(d.monitor().worker, "idle");
+});
+test("monitor identifies the actual executing task and returns to idle after publication", async () => {
+  const f = fixture();
+  let entered!: () => void, release!: () => void;
+  const running = new Promise<void>(r => { entered = r; }), wait = new Promise<void>(r => { release = r; });
+  f.executor.run = async () => { entered(); await wait; };
+  const d = f.make(); await d.init(); await d.scan(); const tick = d.tick(); await running;
+  assert.equal(d.monitor().worker, "executing"); assert.equal(d.monitor().activeTask, "owner/repo#1");
+  assert.equal(d.monitor().tasks[0]!.phase, "running");
+  assert.deepEqual(d.monitor(), JSON.parse(JSON.stringify(d.monitor())));
+  release(); await tick;
+  assert.equal(d.monitor().worker, "idle"); assert.equal(d.monitor().activeTask, undefined);
+  assert.equal(d.monitor().tasks[0]!.status, "done");
+});
+
+test("closing a stale task preserves work and stops discovery even when issue and PR are gone", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const before = d.status()[0]!;
+  await d.closeTask(before.key); await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  for (const field of ["worktree", "branch", "sessionID", "commit", "phase"] as const) assert.equal(d.status()[0]![field], before[field]);
+  f.github.issues = async () => [issue];
+  f.github.issue = f.github.pull = async () => { throw new Error("Deleted from GitHub"); };
+  f.github.comments = async () => { throw new Error("Must not fetch comments for closed task"); };
+  const next = f.make(); await next.init(); await next.scan(); await next.tick();
+  assert.equal(next.status().length, 1); assert.equal(next.status()[0]!.status, "closed");
+  assert.equal(next.runtime(before.sessionID!), null);
+  await assert.rejects(next.restartWorkflow(before.key), /tracking is closed/);
+  assert.equal(await next.closeTask(before.key), false);
+  assert.equal(await next.retry(before.key, true), false);
+});
+
+test("close interrupts an active session and a late checkpoint cannot verify or publish", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_active" }); entered(); await pending; await checkpoint({ sessionReady: true }); };
+  f.executor.cancel = async (_task, related) => { assert.equal(related, true); finish(); };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await d.closeTask("owner/repo#1"); await work; await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  assert.equal(d.status()[0]!.sessionID, "ses_active");
+  assert.ok(!f.events.includes("verify")); assert.ok(!f.events.includes("push"));
+});
+
+test("closure failures stay visible and restart retries without resuming implementation", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.cancel = async () => { throw new Error("Interrupt connection failed"); };
+  await d.closeTask("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "closing"); assert.match(d.activity()[0]!.error!, /Interrupt connection/);
+  f.executor.cancel = async () => {};
+  f.advance(); const next = f.make(); await next.init(); await next.tick(); await next.settle();
+  assert.equal(next.status()[0]!.status, "closed"); assert.deepEqual(f.events, []);
+});
+
+test("closing a waiting task retains question and feedback but accepts no later runtime actions", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.run = async (_task, checkpoint) => { await checkpoint({ sessionID: "ses_test" }); await d.question("ses_test", "q1", "Need permission"); throw new Error("Stopped"); };
+  await d.tick(); const previous = d.status()[0]!;
+  await d.closeTask(previous.key); await d.settle();
+  assert.deepEqual(d.status()[0]!.question, previous.question);
+  await assert.rejects(d.question("ses_test", "q2", "Again"), /No active/);
+  await assert.rejects(d.helper("ses_test", "h1", "vision"), /No active/);
+});
+
+test("closure refuses an in-flight publication without claiming to undo a remote push", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.push = async () => { entered(); await pending; };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await assert.rejects(d.closeTask("owner/repo#1"), /already in flight/);
+  assert.equal(d.status()[0]!.status, "ready");
+  finish(); await work;
+  await d.closeTask("owner/repo#1"); await d.settle(); assert.equal(d.status()[0]!.status, "closed");
+});
+
+test("closure during verification waits for local work and prevents the following push", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.verify = async () => { entered(); await pending; return { checks: ["passed"], commit: "saved-locally" }; };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  await d.closeTask("owner/repo#1");
+  assert.equal(d.status()[0]!.status, "closing");
+  assert.equal(d.monitor().worker, "maintenance");
+  finish(); await work; await d.settle();
+  assert.equal(d.status()[0]!.status, "closed");
+  assert.equal(f.events.includes("push"), false); assert.equal(f.events.includes("pr"), false);
+});
+
+test("completion is persisted before verification, bound to its commit and reused after publication failure", async () => {
+  const f = fixture(); let summaries = 0, body = "", updates = 0;
+  f.executor.summary = async t => { summaries++; return { text: "Delivered the final behavior.", sessionID: t.sessionID, round: t.round }; };
+  f.executor.verify = async () => {
+    assert.equal(f.store.data.tasks[0]?.completion?.text, "Delivered the final behavior.");
+    return { checks: ["unit checks passed"], commit: "verified-sha" };
+  };
+  f.github.ensurePull = async (_repo, _branch, _base, _title, text) => { body = text; return { number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" }; };
+  f.github.updatePullBody = async () => { if (++updates === 1) throw new Error("lost update response"); };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.phase, "publishing");
+  assert.equal(d.status()[0]?.completion?.commit, "verified-sha");
+  assert.match(body, /Delivered the final behavior/); assert.doesNotMatch(body, /Problem and verification plan/);
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
+  assert.equal(summaries, 1); assert.equal(restarted.status()[0]?.status, "done");
+  assert.equal(restarted.status()[0]?.publishedBody, body);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
+
+test("publication retries a lagging PR after owner restart without rerunning work or pushing again", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.github.comments = async () => [{ id: 43, body: "Fix the tests", user: { login: "alice" } }];
+  let updates = 0;
+  f.github.updatePullBody = async () => { if (++updates === 1) throw new PullHeadPending("GitHub PR still reports the previous commit"); };
+  f.executor.verify = async () => { f.events.push("verify"); return { checks: ["passed"], commit: "round-two" }; };
+  await d.scan(); await d.tick();
+  const saved = d.status()[0]!;
+  assert.equal(saved.status, "retry_wait"); assert.equal(saved.phase, "publishing");
+  assert.equal(saved.pushedCommit, "round-two"); assert.equal(saved.completion?.commit, "round-two");
+  assert.equal(saved.publishedHead?.commit, "sha");
+  const events = [...f.events];
+  // Exercise the durable schema, not just the in-memory task object.
+  f.store.data = Queue.parse(JSON.parse(JSON.stringify(f.store.data)));
+  f.advance(); const restarted = f.make(); await restarted.init(); await restarted.tick();
+  assert.equal(restarted.status()[0]?.status, "done"); assert.equal(restarted.status()[0]?.publishedHead?.commit, "round-two");
+  assert.equal(updates, 2); assert.deepEqual(f.events, events);
+});
+
+test("PR propagation retries stop at the configured attempt limit while retaining the pushed commit", async () => {
+  const f = fixture(), d = f.make();
+  f.github.updatePullBody = async () => { throw new PullHeadPending("GitHub PR has not caught up"); };
+  await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  for (let attempt = 1; attempt < options.maxAttempts; attempt++) { f.advance(); await d.tick(); }
+  const saved = d.status()[0]!;
+  assert.equal(saved.status, "failed"); assert.equal(saved.phase, "publishing");
+  assert.equal(saved.attempts, options.maxAttempts); assert.equal(saved.pushedCommit, "sha");
+  assert.equal(f.events.filter(e => e === "push").length, 1);
+  assert.equal(f.events.filter(e => e === "run").length, 1);
+});
+
+test("follow-up publication keeps the initial report and updates the same PR from the new session only after push", async () => {
+  const f = fixture(); const bodies: string[] = [];
+  f.executor.run = async (t, checkpoint) => { await checkpoint({ sessionID: `ses_round_${t.round ?? 1}` }); };
+  f.executor.summary = async t => ({ text: `Delivered round ${t.round ?? 1}.`, sessionID: t.sessionID, round: t.round });
+  f.github.updatePullBody = async (_r, _n, _commit, _key, body, previous) => {
+    assert.equal(f.events.at(-1), bodies.length ? "push" : "pr");
+    if (bodies.length) assert.equal(previous, bodies[0]);
+    bodies.push(body);
+  };
+  const d = f.make(); await d.init(); await d.scan(); await d.tick();
+  f.github.findPull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "open" });
+  f.github.comments = async () => [{ id: 43, body: "Improve bindings", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]?.round, 2); assert.equal(d.status()[0]?.status, "done");
+  assert.match(bodies[1]!, /Delivered round 1/); assert.match(bodies[1]!, /Delivered round 2/);
+  assert.match(bodies[1]!, /Latest update — round 2/);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+for (const phase of ["verifying", "publishing"] as const) {
+  test(`legacy ${phase} checkpoint recovers a missing summary without rerunning implementation`, async () => {
+    const f = fixture(), d = f.make(); await d.init(); await d.scan();
+    const t = f.store.data.tasks[0]!;
+    Object.assign(t, { phase, sessionID: "ses_legacy", worktree: "/worktree", baseSha: "base", baseBranch: "main", commit: "sha", checks: ["saved check passed"] });
+    let body = "", reads = 0;
+    f.executor.summary = async () => { reads++; return { unavailable: "The saved completion session is no longer available." }; };
+    f.github.updatePullBody = async (_r, _n, _c, _k, text) => { body = text; };
+    const restarted = f.make(); await restarted.init(); await restarted.tick();
+    assert.equal(restarted.status()[0]?.status, "done"); assert.equal(reads, 1);
+    assert.match(body, /Summary unavailable: The saved completion session is no longer available/);
+    assert.match(body, /Verified commit: sha/);
+    assert.equal(f.events.includes("run"), false);
+    assert.equal(f.events.includes("verify"), phase === "verifying");
+  });
+}
+
+test("cancel a live round drains work, preserves history and keeps watching without publication", async () => {
+  const f = fixture(); let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_cancelled" }); entered(); await pending; await checkpoint({ sessionReady: true }); };
+  f.executor.cancel = async () => { finish(); };
+  const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+  assert.equal(await d.cancelRound("owner/repo#1"), true);
+  await work; await d.settle();
+  const t = d.status()[0]!;
+  assert.equal(t.status, "watching"); assert.equal(t.cancelledRounds?.[0]?.sessionID, "ses_cancelled");
+  assert.equal(t.cancelledRounds?.[0]?.worktree, "/worktree");
+  assert.equal(f.events.includes("verify"), false); assert.equal(f.events.includes("push"), false);
+  assert.equal(d.runtime("ses_cancelled"), null);
+  await d.tick(); assert.equal(d.status()[0]!.status, "watching");
+  assert.equal(await d.cancelRound(t.key), false);
+});
+
+test("cancellation survives restart and failed interruption without losing new feedback", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.cancel = async () => { throw new Error("interrupt unavailable"); };
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "cancelling");
+  assert.match(d.activity()[0]!.error!, /interrupt unavailable/);
+  assert.equal(d.monitor().worker, "maintenance");
+  await assert.rejects(d.closeTask("owner/repo#1"), /cancellation is still/);
+  f.github.comments = async () => [{ id: 44, body: "New scope only", user: { login: "alice" } }];
+  await d.scan(); assert.equal(d.status()[0]!.pendingFeedback?.length, 0);
+  f.executor.cancel = async () => {};
+  f.advance(); const next = f.make(); await next.init(); await next.tick(); await next.settle();
+  assert.equal(next.status()[0]!.status, "watching"); assert.equal(next.status()[0]!.cancelledRounds?.length, 1);
+  await next.scan(); assert.equal(next.status()[0]!.pendingFeedback?.length, 1);
+  f.executor.prepare = async t => {
+    assert.equal(t.worktree, undefined); assert.match(t.localBranch!, /-r2$/);
+    assert.equal(t.feedback?.[0]?.body, "New scope only");
+    return { worktree: "/new-worktree", baseSha: "base" };
+  };
+  await next.tick(); assert.equal(next.status()[0]!.status, "done");
+  assert.equal(next.status()[0]!.round, 2); assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("cancelling follow-up retains the PR and published head; a new round updates that PR", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  const pr = d.status()[0]!.pr!;
+  f.github.findPull = async () => pr;
+  f.github.comments = async () => [{ id: 43, body: "Unwanted step", user: { login: "alice" } }];
+  f.executor.run = async () => { throw new Blocked("Stopped unwanted work"); };
+  await d.scan(); await d.tick();
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.deepEqual(d.status()[0]!.pr, pr);
+  assert.equal(d.status()[0]!.publishedHead?.commit, "sha");
+  assert.equal(d.activity()[0]!.error, undefined); assert.match(d.activity()[0]!.historicalError!, /Stopped unwanted/);
+  f.github.comments = async () => [{ id: 44, body: "A different step", user: { login: "alice" } }];
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_third" }); };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "done"); assert.equal(d.status()[0]!.round, 3);
+  assert.equal(f.events.filter(e => e === "pr").length, 1);
+});
+
+test("resuming closed tracking skips the old round and backlog, admitting only future feedback", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  await d.closeTask("owner/repo#1"); await d.settle();
+  const epoch = d.status()[0]!.controlVersion!;
+  f.github.comments = async () => [{ id: 44, body: "Old backlog", user: { login: "alice" } }];
+  await d.cancelRound("owner/repo#1", true); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.equal(d.status()[0]!.controlVersion, epoch + 1);
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "watching");
+  assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+  f.github.comments = async () => [{ id: 45, body: "New authorized task", user: { login: "alice" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "done");
+});
+
+test("closed or missing GitHub objects leave tracking closed on resume", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+  await d.closeTask("owner/repo#1"); await d.settle();
+  f.github.pull = async () => ({ number: 2, html_url: "https://github.com/owner/repo/pull/2", state: "closed" });
+  await assert.rejects(d.cancelRound("owner/repo#1", true), /PR is no longer open/);
+  assert.equal(d.status()[0]!.status, "closed");
+  f.github.issue = async () => { throw new GithubError(404); };
+  await assert.rejects(d.cancelRound("owner/repo#1", true), /404/);
+  assert.equal(d.status()[0]!.status, "closed");
+});
+
+test("cancellation refuses in-flight publication and waits for verification before watching", async () => {
+  for (const operation of ["verify", "push"] as const) {
+    const f = fixture(); let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(r => { entered = r; }), pending = new Promise<void>(r => { finish = r; });
+    if (operation === "verify") f.executor.verify = async () => { entered(); await pending; return { checks: [], commit: "local" }; };
+    else f.executor.push = async () => { entered(); await pending; };
+    const d = f.make(); await d.init(); await d.scan(); const work = d.tick(); await started;
+    if (operation === "push") await assert.rejects(d.cancelRound("owner/repo#1"), /already in flight/);
+    else { await d.cancelRound("owner/repo#1"); assert.equal(d.status()[0]!.status, "cancelling"); }
+    finish(); await work; await d.settle();
+    assert.equal(d.status()[0]!.status, operation === "verify" ? "watching" : "done");
+    if (operation === "verify") assert.equal(f.events.includes("pr"), false);
+  }
+});
+
+test("a permission answer to an archived cancelled question does not start another round", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  f.executor.run = async (_, checkpoint) => { await checkpoint({ sessionID: "ses_permission" }); await d.question("ses_permission", "permission1", "Allow?", { action: "external_directory", resources: ["/tmp"] }); };
+  await d.tick(); await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.comments = async () => [{ id: 44, body: "/allow permission1", user: { login: "alice" } }];
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "watching"); assert.deepEqual(d.status()[0]!.pendingFeedback, []);
+});
+
+test("watching auto-merge uses only the last published head, never a cancelled round's commit", async () => {
+  for (const saved of [true, false]) {
+    const f = fixture(), d = f.make(); await d.init(); await d.scan(); await d.tick();
+    Object.assign(f.store.data.tasks[0]!, { status: "watching", commit: "cancelled-unpublished", publishedHead: saved ? { commit: "previous-published", at: 1000 } : undefined });
+    const heads: string[] = [];
+    f.github.mergeApproved = async (_repo, _pr, head) => { heads.push(head); return true; };
+    const resumed = f.make(); await resumed.init(); await resumed.tick();
+    assert.deepEqual(heads, saved ? ["previous-published"] : []);
+  }
+});
+
+test("after cancellation, comment-routed issues accept new authorized feedback without another mention", async () => {
+  const f = fixture(), request = { ...issue, body: "No routing tag", user: { login: "outside" } };
+  f.github.issue = async () => request; f.github.issues = async () => [request];
+  f.github.comments = async () => [{ id: 1, body: "@deepseek original task", user: { login: "alice" } }];
+  const d = f.make(); await d.init(); await d.scan(); await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.comments = async () => [{ id: 2, body: "Do the new task", user: { login: "alice" } }];
+  await d.scan(); await d.tick(); assert.equal(d.status()[0]!.status, "done");
+});
+
+test("failed cancellation completion save remains cancellable and archives the round only once on retry", async () => {
+  const f = fixture(), d = f.make(); await d.init(); await d.scan();
+  const save = f.store.save.bind(f.store); let fail = true;
+  f.store.save = async q => { if (fail && q.tasks[0]?.status === "watching") { fail = false; throw new Error("disk write failed"); } await save(q); };
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  assert.equal(d.status()[0]!.status, "cancelling"); assert.equal(d.status()[0]!.cancelledRounds, undefined);
+  assert.match(d.activity()[0]!.error!, /disk write failed/);
+  f.advance(); await d.tick(); await d.settle();
+  assert.equal(d.status()[0]!.status, "watching"); assert.equal(d.status()[0]!.cancelledRounds?.length, 1);
+});
+
+test("cancelling before PR creation does not reuse the cancelled summary as the next PR's original report", async () => {
+  const f = fixture(), d = f.make();
+  const publish = f.github.ensurePull;
+  f.github.ensurePull = async () => { throw new Error("PR creation unavailable"); };
+  f.executor.summary = async t => ({ text: `Result of round ${t.round ?? 1}`, sessionID: t.sessionID, round: t.round });
+  await d.init(); await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.phase, "publishing"); assert.ok(d.status()[0]!.initialCompletion);
+  await d.cancelRound("owner/repo#1"); await d.settle();
+  f.github.ensurePull = publish;
+  f.github.comments = async () => [{ id: 43, body: "Different new work", user: { login: "alice" } }];
+  let body = ""; f.github.updatePullBody = async (_r, _n, _c, _k, value) => { body = value; };
+  await d.scan(); await d.tick();
+  assert.equal(d.status()[0]!.status, "done");
+  assert.match(body, /Result of round 2/); assert.doesNotMatch(body, /Result of round 1/);
 });

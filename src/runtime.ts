@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Task } from "./dispatcher.js";
 import { GithubRpc } from "./rpc.js";
 import { runtimeBridge } from "./bridge.js";
+import { repositoryFileAccess } from "./repository-permissions.js";
 import { botPrompt } from "./prompt.js";
 import type { GithubOptions } from "./config.js";
 
@@ -120,7 +121,7 @@ export async function setupRuntime(ctx: Plugin.Context, options: GithubOptions) 
             if (!answer || answer.error || answer.finish !== "stop") throw new Error("Media helper returned no completed answer");
             return { content: `Media helper ${id}:\n${JSON.stringify(answer).slice(0, 24000)}` };
           } catch (error) {
-            if (sessionRequest.signal.aborted) await ctx.session.interrupt({ sessionID: id, continue: false }, { signal: AbortSignal.timeout(15000) }).catch(() => {});
+            if (sessionRequest.signal.aborted) await ctx.session.interrupt({ sessionID: id, resume: false }, { signal: AbortSignal.timeout(15000) }).catch(() => {});
             throw error;
           }
         },
@@ -136,8 +137,19 @@ export async function setupRuntime(ctx: Plugin.Context, options: GithubOptions) 
       const task = await lookup(event.sessionID); if (!task) return;
       const resources = [...event.resources].sort();
       const decision = task.permissions?.find(p => p.sessionID === task.sessionID && p.action === event.action && JSON.stringify(p.resources) === JSON.stringify(resources));
-      event.effect = decision?.allow ? "allow" : "deny";
-      if (decision) return;
+      if (decision) { event.effect = decision.allow ? "allow" : "deny"; return; }
+      const repo = options.repositories.find(repo => repo.repo.toLowerCase() === task.repo.toLowerCase());
+      // Do not bypass an unanswered question or the read-only media helper.
+      if (repo?.autoApproveRepositoryFiles && task.worktree && !(task.question && !task.question.delivered)
+        && !task.helpers?.some(h => h.id === event.sessionID)
+        && ["external_directory", "read", "edit"].includes(event.action)) {
+        const session = await ctx.session.get({ sessionID: event.sessionID }, { signal: request().signal });
+        if (await repositoryFileAccess(event.action, resources, session.location.directory, [repo.directory, task.worktree])) {
+          event.effect = "allow";
+          return;
+        }
+      }
+      event.effect = "deny";
       await ask(event.sessionID, `permission:${event.action}:${JSON.stringify(resources)}`, `Permission required: ${event.action}\n\nResources:\n${JSON.stringify(resources, null, 2)}\n\nApprove only if you want this exact operation to run.`, { action: event.action, resources });
       event.message = "Approval requested in the GitHub issue. Stop and wait for the reply.";
     }));

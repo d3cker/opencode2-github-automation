@@ -53,20 +53,25 @@ Use a model available in your own OpenCode 2 installation. Optional fields:
 
 | Field | Purpose |
 | --- | --- |
+| `autoApproveRepositoryFiles` | Opt-in automatic `external_directory`, `read`, and `edit` approval within this repository and its assigned task worktree; omitted/`false` keeps existing permission behavior. Shell rules are unchanged. |
 | `baseBranch` | Base for new worktrees and PRs; defaults to the GitHub default branch. |
 | `capabilities` | Main model support: `text`, `vision`, `audio`; defaults to `["text"]`. |
 | `mediaModel` | Separate helper model and its capabilities; example below. |
 | `systemPromptFile` | Optional Markdown instructions appended to the bundled bot prompt; path relative to the primary checkout, or absolute. |
 | `trigger` | Mention that starts work; defaults to `@opencodebot`. |
 | `everySeconds` | Polling interval; defaults to 60 seconds. |
-| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. |
+| `check` | Test command as an argument array, such as `["npm", "test"]`; `false` skips tests. If omitted, detect a package test script and its package manager; fail setup if no test command is found. |
 | `authors` | GitHub usernames allowed to request work and authorize merging (merge also requires repository write access). |
 | `signature` | Signature appended to every posted comment and PR description; defaults to `your-github-login[OpenCode2]`. |
 | `autoMerge` | Automatic merge settings: `enabled` (default `true`), `method` (default `squash`), and exact approval `comments`. |
 
 When tests are skipped, the PR explicitly reports that automated tests were not
 run. Git consistency checks and the requirement for an actual change remain.
-Restart the service while idle after changing configuration.
+Restart the service while idle after changing configuration, then activate each
+owner project again. Recovery commands do not reload configuration or reset a
+pinned base. Session/command deadlines and worker retry limits are advanced
+`GithubOptions`, not fields accepted by the strict easy JSON schema above; see
+[advanced options](advanced.md#options).
 
 For noninteractive setup, use `--yes` to accept defaults for omitted options.
 Provide the model and a test command (or explicitly skip tests):
@@ -76,10 +81,52 @@ cd /absolute/path/to/your-project
 "$HOME/.local/bin/opencode2-automation" init --model provider/model --skip-tests --yes
 ```
 
-Optional flags: `--base-branch develop`, `--capabilities text`,
+Optional flags: `--auto-approve-repository-files`, `--base-branch develop`, `--capabilities text`,
 `--media-model provider/vision-model`, `--media-capabilities text,vision`,
 `--system-prompt .opencode/bot.md`. With `--yes`, supply a helper explicitly
 if you want media support with a text-only main model.
+
+## Repository file approvals
+
+During interactive `init`, choose **yes** for "Automatically approve file access
+in this repository and its task worktrees". The default is **no**. Noninteractive
+setup opts in with `--auto-approve-repository-files`; `--yes` alone does not enable it.
+For an existing project, add this field to its existing `.opencode/automation.json`
+without rerunning `init` or replacing the other settings:
+
+```json
+{
+  "model": "provider/model",
+  "autoApproveRepositoryFiles": true
+}
+```
+
+This is a plugin setting for this repository, not a global OpenCode permission.
+The runtime resolves the configured checkout path automatically, and also includes
+the assigned task worktree when advanced state storage places it outside the
+checkout. The policy follows new rounds and native subagents through their main
+task; it is not tied to a previous session's `/allow` reply. Other repositories
+and ordinary non-bot sessions are unaffected. No user-wide configuration is written.
+
+Only `ask` decisions for `external_directory`, `read`, and `edit` qualify. Every
+resource must resolve inside the repository or assigned worktree. Symlink targets
+are checked, including existing parents of new files. Paths to siblings, symlink
+escapes, unknown patterns, and unresolvable boundaries use the normal approval
+flow. Explicit OpenCode denials and exact saved `/deny` decisions remain effective.
+Media helpers remain read-only and cannot use tools. Shell, network, subagent
+launch, and other action permissions are unchanged; a shell command can affect
+files outside its working directory, so its location does not grant blanket consent.
+
+After changing the setting, restart the idle service and activate the owner again.
+The executor refreshes generated worktree runtime settings before continuing a
+saved session. An already-pending permission question still needs its exact
+`/allow QUESTION_ID` or `/deny QUESTION_ID` reply; enabling this option does not
+answer it or bypass unrelated pending questions. Existing configs remain opt-out.
+Set the field to `false` and reload to disable automatic file approval; previously
+saved explicit approvals still have their original session scope.
+
+The model must still build, edit, and test in its assigned worktree. Permission to
+access another checkout does not make that checkout the correct validation target.
 
 ## Questions, branches, media, and bot instructions
 
@@ -152,8 +199,12 @@ verified head SHA; a changed branch cannot be merged using an older approval.
 The bot does not request a protection bypass. Configure required checks and review
 rules on GitHub for your repository's policy.
 
-Approvals must be newer than the bot's latest publication. On upgrade, old tasks
-start watching for new approvals; historical approvals do not cause a merge.
+Formal **Approve** reviews must reference the exact published commit and remain
+the reviewer's latest decisive review. They can precede completion of publication:
+retrying a description update does not invalidate approval of unchanged code.
+Merge comments have no commit binding, so they must be newer than the bot's latest
+publication. Old tasks without a publication timestamp start a fresh comment
+window on upgrade; existing reviews still require the exact verified commit.
 Pending issue feedback is processed before attempting a merge. Merge failures
 are retried at intervals of at least 60 seconds and appear as `mergeError` in
 `status` and in `/bot`. Successful merges receive a signed PR comment.
@@ -163,3 +214,14 @@ acknowledgements. They identify the message in its text; GitHub still attributes
 posts to the account authenticated by your token. Existing posts are not rewritten.
 Set `"autoMerge": { "enabled": false }` to disable automatic merging.
 
+
+## Repository inventory registration
+
+`init` and owner activation register the configured checkout for
+`opencode2-automation list` and `/bot` → **Repositories**. No new project setting
+is required. The registry stores last-resolved repository/base-branch metadata
+and timestamped component snapshots under the user's state directory; it does
+not replace `.opencode/automation.json` or the shared Git queue. Changes to default
+branches are reflected when the owner is activated again. See
+[repository inventory](runtime.md#repository-inventory) to import older inactive
+configurations and distinguish configured projects from running bots.

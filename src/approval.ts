@@ -12,7 +12,10 @@ export function approvalAuthors(reviews: Review[], comments: DatedComment[], hea
   }
   // An outstanding request for changes takes precedence over a merge comment.
   if ([...latest.values()].some(r => r.state === "CHANGES_REQUESTED")) return [];
-  const authors = [...latest.values()].filter(r => r.state === "APPROVED" && r.commit_id === head && Date.parse(r.submitted_at ?? "") > since).map(r => r.user.login);
+  // Reviews are bound to an exact commit. Description/publication retries must
+  // not invalidate an approval already submitted for that same verified head.
+  // Plain merge comments have no commit binding and still need the time window.
+  const authors = [...latest.values()].filter(r => r.state === "APPROVED" && r.commit_id === head && Number.isFinite(Date.parse(r.submitted_at ?? ""))).map(r => r.user.login);
   for (const comment of comments) {
     if (comment.user.type === "Bot" || comment.body.includes("<!-- opencode2:") || Date.parse(comment.created_at) <= since) continue;
     // Exact full-message matching avoids interpreting negations, quotes, or embedded instructions as approval.

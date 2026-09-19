@@ -115,6 +115,10 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     assert.equal(await run(t.worktree!, ["git", "status", "--porcelain"]), "");
     const runtimePath = join(t.worktree!, ".opencode/plugins/automation-runtime/index.js");
     assert.match(await readFile(runtimePath, "utf8"), /workerPlugin/);
+    const optedIn = GithubOptions.parse({ ...options, repositories: [{ ...repo, autoApproveRepositoryFiles: true }] });
+    await installWorkerPlugin(t.worktree!, optedIn, run);
+    assert.match(await readFile(runtimePath, "utf8"), /"autoApproveRepositoryFiles":true/);
+    assert.equal(await run(t.worktree!, ["git", "status", "--porcelain"]), "");
     await assert.rejects(git.verify(t, repo), Blocked);
     await writeFile(join(t.worktree!, "counter.txt"), "fixed\n");
     Object.assign(t, await git.verify(t, repo)); await git.push(t, repo);
@@ -150,6 +154,27 @@ test("real git worktree isolates a fix, verifies, commits and pushes to a local 
     await assert.rejects(git.prepare({ ...task(), worktree: undefined, branch: "automation/missing-base" }, { ...repo, baseBranch: "missing" }), /Could not fetch base branch missing/);
     await writeFile(join(t.worktree!, "counter.txt"), "changed after verification\n");
     await assert.rejects(git.push(t, repo), /changed after verification/);
+    // Cancelling must preserve tracked/untracked drafts in the old worktree,
+    // while the next local branch starts from the remote PR head.
+    await writeFile(join(t.worktree!, "cancelled-draft.txt"), "keep this private draft\n");
+    await writeFile(join(t.worktree!, "local-only.txt"), "unpublished cancelled commit\n");
+    await run(t.worktree!, ["git", "add", "local-only.txt"]);
+    await run(t.worktree!, ["git", "commit", "-m", "Cancelled local work"]);
+    const cancelledHead = await run(t.worktree!, ["git", "rev-parse", "HEAD"]);
+    const next: Task = { ...t, round: 3, worktree: undefined, localBranch: "automation/resume-test-r3", pr: { number: 2, state: "open", html_url: "https://github.com/owner/repo/pull/2" } };
+    Object.assign(next, await git.prepare(next, repo));
+    assert.notEqual(next.worktree, t.worktree);
+    assert.equal(await readFile(join(next.worktree!, "counter.txt"), "utf8"), "fixed\n");
+    await assert.rejects(readFile(join(next.worktree!, "cancelled-draft.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(join(next.worktree!, "local-only.txt")), { code: "ENOENT" });
+    assert.equal(await run(t.worktree!, ["git", "rev-parse", "HEAD"]), cancelledHead);
+    assert.equal(await readFile(join(t.worktree!, "cancelled-draft.txt"), "utf8"), "keep this private draft\n");
+    await writeFile(join(next.worktree!, "new-scope.txt"), "only the new round\n");
+    Object.assign(next, await git.verify(next, repo)); await git.push(next, repo);
+    assert.equal(await run(dir, ["git", "--git-dir", remote, "rev-parse", "refs/heads/recovered-feature"]), next.commit);
+    assert.equal(await readFile(join(t.worktree!, "counter.txt"), "utf8"), "changed after verification\n");
+    assert.equal((await git.prepare(next, repo)).worktree, next.worktree);
+
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -244,4 +269,95 @@ test("the initial coding prompt preserves the confirmed choice and never treats 
   await new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {}).run(t, async p => { Object.assign(t, p); });
   assert.match(prompt, /Heapsort only, with integer input/);
   assert.match(prompt, /publishing proposals alone is never approval/i);
+});
+
+for (const active of [false, true]) {
+  test(`workflow recovery ${active ? "waits for active work without another prompt" : "continues the same interrupted session once across a lost response"}`, async () => {
+    const t: Task = { ...task(), sessionID: "ses_saved", promptAttempted: true, recovery: { id: "recovery-1" } };
+    let outcome = "interrupted", prompts = 0;
+    const messages: unknown[] = [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }];
+    const ctx = { session: {
+      get: async () => ({ location: { directory: "/worktree" }, outcome }),
+      wait: async () => { if (active) outcome = "succeeded"; },
+      context: async () => messages,
+      prompt: async (input: { sessionID: string; id: string; text: string }) => {
+        assert.equal(input.sessionID, "ses_saved"); assert.ok(input.id); assert.equal(t.recovery?.attempted, true);
+        assert.match(input.text, /preserve all completed work/);
+        prompts++; messages.push({ type: "user", text: input.text }, { type: "assistant", finish: "stop" });
+        outcome = "succeeded";
+        throw new Error("Lost prompt response");
+      },
+      interrupt: async () => { assert.fail("Recovery must not interrupt an active session"); },
+      create: async () => { assert.fail("Recovery must reuse its session"); },
+    } } as unknown as Plugin.Context;
+    const make = () => new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+    const checkpoint = async (patch: Partial<Task>) => { Object.assign(t, patch); };
+    if (!active) await assert.rejects(make().run(t, checkpoint), /Lost prompt response/);
+    await make().run(t, checkpoint);
+    assert.equal(prompts, active ? 0 : 1);
+    assert.equal(t.sessionID, "ses_saved");
+  });
+}
+
+test("an unconfirmed recovery prompt is blocked instead of silently publishing or sending it twice", async () => {
+  const t: Task = { ...task(), sessionID: "ses_saved", promptAttempted: true, recovery: { id: "missing", attempted: true } };
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" }, outcome: "succeeded" }), wait: async () => {},
+    context: async () => [{ type: "user", text: "opencode2-task:owner/repo#1" }, { type: "assistant", finish: "stop" }],
+    prompt: async () => { assert.fail("Do not repeat a prompt of uncertain delivery"); },
+  } } as unknown as Plugin.Context;
+  await assert.rejects(new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {}).run(t, async () => {}), /Recovery prompt delivery is uncertain/);
+});
+
+test("a real wait deadline records a recoverable session stop and interrupts once", async () => {
+  const { SessionStopped } = await import("../src/dispatcher.js");
+  let interrupts = 0;
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" } }),
+    wait: async () => new Promise(() => {}),
+    interrupt: async () => { interrupts++; },
+  } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, { ...options, sessionTimeoutSeconds: 0.01 }, new AbortController().signal, async () => {});
+  const timer = setTimeout(() => {}, 1000);
+  try {
+    await assert.rejects(executor.run({ ...task(), sessionID: "ses_saved", promptAttempted: true }, async () => {}), SessionStopped);
+    assert.equal(interrupts, 1);
+  } finally { clearTimeout(timer); }
+});
+
+test("task closure interrupts all saved sessions, tolerates missing ones and waits for idleness", async () => {
+  const interrupted: string[] = [], waited: string[] = [];
+  const ctx = { session: {
+    interrupt: async (input: { sessionID: string; resume?: boolean }) => { assert.deepEqual(input, { sessionID: input.sessionID, resume: false }); interrupted.push(input.sessionID); if (input.sessionID === "gone") throw { _tag: "Session.NotFoundError" }; },
+    wait: async ({ sessionID }: { sessionID: string }) => { waited.push(sessionID); },
+  } } as unknown as Plugin.Context;
+  const t = { ...task(), sessionID: "main", sessionIDs: ["main", "previous", "gone"], helpers: [{ id: "media", parentID: "main", capability: "vision" as const }] };
+  await new OpenCodeExecutor(ctx, options, new AbortController().signal).cancel(t, true);
+  assert.deepEqual(interrupted.sort(), ["gone", "main", "media", "previous"]);
+  assert.deepEqual(waited.sort(), ["main", "media", "previous"]);
+});
+
+test("closing after a checkpoint prevents a late implementation prompt", async () => {
+  let prompts = 0;
+  const t = { ...task(), sessionID: "existing", sessionReady: true };
+  const ctx = { session: {
+    get: async () => ({ location: { directory: "/worktree" } }),
+    prompt: async () => { prompts++; },
+  } } as unknown as Plugin.Context;
+  const executor = new OpenCodeExecutor(ctx, options, new AbortController().signal, async () => {});
+  await assert.rejects(executor.run(t, async patch => { Object.assign(t, patch); if (patch.promptAttempted) t.status = "closing"; }), /tracking is closed/);
+  assert.equal(prompts, 0);
+});
+
+test("legacy publication retrieves the saved final summary without invoking the model and distinguishes missing sessions from transient errors", async () => {
+  let mode = "success";
+  const ctx = { session: {
+    get: async () => { if (mode === "missing") throw { _tag: "SessionNotFoundError" }; if (mode === "network") throw new Error("network"); return { outcome: "succeeded" }; },
+    context: async () => [{ type: "assistant", finish: "stop", content: [{ type: "reasoning", text: "hidden" }, { type: "text", text: "## Summary\n\nDelivered changes." }] }],
+  } } as unknown as Plugin.Context;
+  const e = new OpenCodeExecutor(ctx, options, new AbortController().signal);
+  const t = { ...task(), sessionID: "ses_test", round: 1 };
+  assert.deepEqual(await e.summary(t), { sessionID: "ses_test", round: 1, text: "## Summary\n\nDelivered changes." });
+  mode = "missing"; assert.match((await e.summary(t)).unavailable!, /no longer available/);
+  mode = "network"; await assert.rejects(e.summary(t), /network/);
 });
