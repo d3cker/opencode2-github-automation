@@ -430,8 +430,10 @@ scheduler jobs and truncates long labels/errors. `/bot` manages task sessions;
 
 The TUI and owner plugin must both contain the monitor API. With an older server,
 an unloaded/unconfigured owner, a direct worktree-only launch, or a failed RPC,
-the panel reports unavailable status. Load the configured owner and update both
-sides as needed; reopen TUI clients after installation. Monitoring uses the
+the panel reports unavailable status. Opening an unconfigured folder does not
+initialize automation. The panel supports both OpenCode 2.0.6 and 2.0.10 theme
+structures, including while connecting or displaying unavailable status. Load the
+configured owner and update both sides as needed; reopen TUI clients after installation. Monitoring uses the
 connected OpenCode client, so it also works with a remote service when the correct
 owner location and updated plugin are available there. Live worker/scan diagnostics
 reset when the owner is recreated; task checkpoints and scheduler history remain
