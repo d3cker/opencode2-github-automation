@@ -8,6 +8,12 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+### Fixed
+
+- Prevent the runtime sidebar from crashing on OpenCode 2.0.10 after semantic
+  theme tokens changed, including in folders without initialized automation.
+  Retain 2.0.6 theme support and test both SDK themes in the native renderer.
+
 ## 0.6.6
 
 ### Documentation
