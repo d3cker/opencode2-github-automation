@@ -8,6 +8,8 @@ include the full version, for example `## 0.7.0-beta.1`.
 
 ## Unreleased
 
+## 0.6.7
+
 ### Documentation
 
 - Record OpenCode 2.0.15 as the last tested version in README, with the verified
