@@ -1,11 +1,29 @@
+import type { RGBA } from "@opentui/core";
 import type { Plugin } from "@opencode/plugin/tui";
 import { jsx } from "@opentui/solid/jsx-runtime";
 import { createSignal } from "solid-js";
 import { GithubRpc, SchedulerRpc } from "./rpc.js";
 import { RuntimePoller, runtimeLines, selectedTask, type RuntimeSnapshot } from "./runtime-panel.js";
 
+// OpenCode 2.0.10 renamed semantic text tokens and removed text.status.
+// Keep the adapter structural so the pinned 2.0.6 SDK remains supported.
+type SidebarTheme = { text: {
+  base?: RGBA; default?: RGBA; muted?: RGBA; subdued?: RGBA;
+  status?: { running?: RGBA };
+  action?: { primary?: { base?: RGBA; default?: RGBA } };
+  feedback?: { error?: { base?: RGBA; default?: RGBA }; warning?: { base?: RGBA; default?: RGBA } };
+} };
+
+function sidebarColor(theme: SidebarTheme, tone: string | undefined) {
+  const text = theme.text;
+  const base = text.base ?? text.default;
+  if (tone === "error" || tone === "warning") return text.feedback?.[tone]?.base ?? text.feedback?.[tone]?.default ?? base;
+  if (tone === "heading") return text.action?.primary?.base ?? text.status?.running ?? base;
+  if (tone === "muted") return text.muted ?? text.subdued ?? base;
+  return base;
+}
+
 export function RuntimeSidebar(props: { context: Plugin.Context; snapshot: () => RuntimeSnapshot; now: () => number; sessionID: string }) {
-  const theme = props.context.theme;
   return jsx("box", { flexDirection: "column", marginTop: 1, flexShrink: 0,
     get children() {
       const snapshot = props.snapshot();
@@ -14,7 +32,7 @@ export function RuntimeSidebar(props: { context: Plugin.Context; snapshot: () =>
         ? props.context.data.session.status(task.sessionID) : undefined;
       return runtimeLines(snapshot, props.now(), props.sessionID, sessionStatus).map(line => jsx("text", {
         content: line.text, wrapMode: "word", marginTop: line.tone === "heading" ? 1 : 0,
-        fg: line.tone === "error" ? theme.text.feedback.error.default : line.tone === "warning" ? theme.text.feedback.warning.default : line.tone === "heading" ? theme.text.status.running : line.tone === "muted" ? theme.text.subdued : theme.text.default,
+        fg: sidebarColor(props.context.theme, line.tone),
       }));
     },
   });

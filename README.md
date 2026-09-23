@@ -11,12 +11,18 @@ titles, and can merge after an authorized approval. The TUI is optional.
 
 ## Requirements
 
-- OpenCode **2.0.6** with a working model; client/plugin SDK pinned to `2.0.6`.
+- OpenCode **2**, last tested with **2.0.15**; a working model is required.
+  Client/plugin SDK dependencies remain pinned to `2.0.6`.
 - Node.js 22+, npm, and Git on macOS/Linux.
 - GitHub authentication (`gh auth login` and `gh auth setup-git`, or a token in
   the service environment) and permission to comment, push, and create PRs.
 - When configuring a project: a primary Git checkout with a GitHub `origin`,
   a pushed commit, and issues enabled.
+
+Compatibility checks for the current `devel` build covered SDK type checking,
+native sidebar rendering with the 2.0.15 theme, and live session/status RPCs and
+GitHub polling. They did not include a new issue-to-PR execution. The sidebar fix
+required by newer themes is on `devel` and is not included in stable `v0.6.6`.
 
 Choose **one** installation method below. No target repository is needed yet.
 Nothing needs to be published to npm. `$HOME` expands to your home directory.
@@ -26,12 +32,12 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 Run this command on the machine running OpenCode 2:
 
 <!-- latest-release:start -->
-Latest stable release: **[v0.6.6](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.6)**.
+Latest stable release: **[v0.6.7](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.7)**.
 
-[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz.sha256)
+[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz.sha256)
 
 ```bash
-npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz"
+npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz"
 ```
 <!-- latest-release:end -->
 
