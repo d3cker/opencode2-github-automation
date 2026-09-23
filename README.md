@@ -32,12 +32,12 @@ Nothing needs to be published to npm. `$HOME` expands to your home directory.
 Run this command on the machine running OpenCode 2:
 
 <!-- latest-release:start -->
-Latest stable release: **[v0.6.6](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.6)**.
+Latest stable release: **[v0.6.7](https://github.com/d3cker/opencode2-github-automation/releases/tag/v0.6.7)**.
 
-[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz.sha256)
+[Download the .tgz package](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz) · [SHA-256 checksum](https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz.sha256)
 
 ```bash
-npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.6/opencode2-automation-0.6.6.tgz"
+npm install --global --prefix "$HOME/.local" "https://github.com/d3cker/opencode2-github-automation/releases/download/v0.6.7/opencode2-automation-0.6.7.tgz"
 ```
 <!-- latest-release:end -->
 
