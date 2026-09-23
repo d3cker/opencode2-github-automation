@@ -11,12 +11,18 @@ titles, and can merge after an authorized approval. The TUI is optional.
 
 ## Requirements
 
-- OpenCode **2.0.6** with a working model; client/plugin SDK pinned to `2.0.6`.
+- OpenCode **2**, last tested with **2.0.15**; a working model is required.
+  Client/plugin SDK dependencies remain pinned to `2.0.6`.
 - Node.js 22+, npm, and Git on macOS/Linux.
 - GitHub authentication (`gh auth login` and `gh auth setup-git`, or a token in
   the service environment) and permission to comment, push, and create PRs.
 - When configuring a project: a primary Git checkout with a GitHub `origin`,
   a pushed commit, and issues enabled.
+
+Compatibility checks for the current `devel` build covered SDK type checking,
+native sidebar rendering with the 2.0.15 theme, and live session/status RPCs and
+GitHub polling. They did not include a new issue-to-PR execution. The sidebar fix
+required by newer themes is on `devel` and is not included in stable `v0.6.6`.
 
 Choose **one** installation method below. No target repository is needed yet.
 Nothing needs to be published to npm. `$HOME` expands to your home directory.
